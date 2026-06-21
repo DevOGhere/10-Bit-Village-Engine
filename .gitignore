@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+
+# Vendored upstream — NOT tracked. Cloned at Docker build per vendor/PINNED_COMMIT.txt.
+# Local dev keeps a full checkout here; the pin file (vendor/PINNED_COMMIT.txt) IS tracked.
+vendor/llama.cpp/
+
+# Models — pulled from HF Hub at build/boot, never committed
+models/*.gguf
+
+# Run artifacts
+village.db
+village.db-*
+snapshot.db
+snapshot.db-*
+tbv_memory.db
+*.db-shm
+*.db-wal
+replay/replay.json
+
+# Compiled binaries (rebuilt from source; never tracked)
+/tbv_engine
+tests/infer_hybrid
+tests/resolver
+
+# Never commit the vendored upstream's own 406MB git dir
+vendor/llama.cpp/.git/
+
+# Kept tracked intentionally as gate evidence (do NOT ignore):
+#   phase3_gate.log, hash1.txt, hash2.txt
+
+# macOS
+.DS_Store

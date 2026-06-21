@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>10-Bit Village — Replay Viewer</title>
+<link rel="stylesheet" href="replay.css">
+</head>
+<body>
+<div id="sidebar">
+    <h1>10-Bit Village — Replay</h1>
+    <input type="file" id="fileInput" accept=".json">
+    <h2>Thought / Gossip / Dream log</h2>
+    <div id="log"></div>
+    <h2>Coined words</h2>
+    <div id="coinList"></div>
+</div>
+<div id="main">
+    <canvas id="canvas" width="512" height="384"></canvas>
+    <div id="controls">
+        <button id="playBtn">Play</button>
+        <input type="range" id="scrub" min="0" max="0" value="0">
+        <span id="tickLabel">tick 0 / 0</span>
+        <input type="range" id="speedRange" min="1" max="30" step="1" value="5">
+        <span id="speedLabel">5.0 ticks/s</span>
+    </div>
+</div>
+<script src="replay.js"></script>
+</body>
+</html>

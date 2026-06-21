@@ -1,0 +1,99 @@
+body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", sans-serif;
+    background: #14161c;
+    color: #e6e6e6;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
+
+#sidebar {
+    width: 380px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #2a2d36;
+    padding: 12px;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+
+#main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+}
+
+h1 { font-size: 16px; margin: 0 0 8px 0; }
+h2 { font-size: 13px; margin: 16px 0 6px 0; color: #9aa0ac; text-transform: uppercase; letter-spacing: 0.05em; }
+
+#canvas {
+    border: 1px solid #2a2d36;
+    background: #1c1f27;
+    image-rendering: pixelated;
+}
+
+#controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    max-width: 640px;
+}
+
+#controls button {
+    background: #2a2d36;
+    color: #e6e6e6;
+    border: 1px solid #3a3e4a;
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 14px;
+}
+#controls button:hover { background: #3a3e4a; }
+
+#scrub { flex: 1; }
+#tickLabel { font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; font-size: 12px; color: #9aa0ac; }
+
+#fileInput { margin-bottom: 8px; }
+
+#log {
+    flex: 1;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.4;
+    border: 1px solid #2a2d36;
+    border-radius: 4px;
+    padding: 6px;
+    min-height: 120px;
+}
+
+.event {
+    padding: 4px 6px;
+    margin-bottom: 4px;
+    border-radius: 4px;
+    border-left: 3px solid #555;
+}
+.event.EXPERIENCE { border-left-color: #5fb878; background: rgba(95,184,120,0.08); }
+.event.HEARSAY    { border-left-color: #5b9bd5; background: rgba(91,155,213,0.08); }
+.event.DREAM      { border-left-color: #b07cd6; background: rgba(176,124,214,0.08); }
+.event .meta { color: #9aa0ac; font-size: 10px; margin-bottom: 2px; }
+.event.current { outline: 1px solid #ffd166; }
+
+#coinList {
+    font-size: 12px;
+    max-height: 160px;
+    overflow-y: auto;
+    border: 1px solid #2a2d36;
+    border-radius: 4px;
+    padding: 6px;
+}
+#coinList .coin { padding: 2px 0; border-bottom: 1px solid #2a2d36; }
+#coinList .coin .term { color: #ffd166; font-weight: 600; }
+#coinList .coin.spread { color: #5fb878; }
+
+#speedLabel { font-size: 12px; color: #9aa0ac; min-width: 60px; }
