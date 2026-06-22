@@ -5,27 +5,49 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <optional>
 #include "core/types.h"
 
 namespace tbv {
 
 struct MemoryEntry {
-    uint32_t mem_id      = 0;     // monotonic per run
-    uint64_t tick        = 0;
-    uint32_t actor_id    = 0;     // who the memory is about / its source villager
-    int32_t  importance  = 0;     // engine-derived salience
-    MemType  type        = MemType::EXPERIENCE;
+    uint32_t mem_id       = 0;    // monotonic per run
+    uint64_t tick         = 0;
+    uint32_t actor_id     = 0;    // who the memory is about / its source villager
+    int32_t  importance   = 0;    // engine-derived salience
+    MemType  type         = MemType::EXPERIENCE;
     uint8_t  source_depth = 0;    // hearsay hop count (0 = firsthand)
+    uint32_t origin_mem_id = 0;   // belief-lineage root: self for EXPERIENCE/DREAM,
+                                  // inherited from the source memory for HEARSAY (Step 4)
     std::string text;             // the free prose
 };
+
+// FNV-1a 64-bit over free text. Used as BeliefSurvival's content_hash (Step 4) —
+// deterministic, cheap, no collision-resistance requirement (observational only).
+inline uint64_t fnv64_text(const std::string& s) {
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    return h;
+}
 
 class CognitiveStore {
 public:
     explicit CognitiveStore(size_t cap = 500) : cap_(cap) {}
 
-    void add(MemoryEntry e, uint64_t current_tick = 0) {
+    // Returns the evicted entry (if eviction happened) so callers can mark its death
+    // (BeliefSurvival, Step 4). Previously discarded silently.
+    std::optional<MemoryEntry> add(MemoryEntry e, uint64_t current_tick = 0) {
         mems_.push_back(std::move(e));
-        if (mems_.size() > cap_) evict_lowest(current_tick);
+        if (mems_.size() > cap_) return evict_lowest(current_tick);
+        return std::nullopt;
+    }
+
+    // Checkpoint restore (Step 4): replace contents verbatim, preserving exact insertion
+    // order — dream() reads from the BACK of the vector (most recent insertion), not sorted
+    // by importance/tick/mem_id, so restore must match that order exactly via the caller's
+    // explicit seq ordering (CheckpointMemory.seq ASC).
+    void load_raw(std::vector<MemoryEntry> entries) {
+        mems_ = std::move(entries);
     }
 
     // Lazy time-decay (QA [046]): computed at access, never mutated per-tick (avoids O(N) churn).
@@ -55,7 +77,7 @@ public:
 private:
     // Evict lowest EFFECTIVE importance (decay-aware, consistent with most_salient — QA M3);
     // tie-break = lowest mem_id (forget oldest trivia first). Deterministic.
-    void evict_lowest(uint64_t current_tick) {
+    MemoryEntry evict_lowest(uint64_t current_tick) {
         size_t idx = 0;
         int32_t lo = effective_importance(mems_[0], current_tick);
         for (size_t i = 1; i < mems_.size(); ++i) {
@@ -64,7 +86,9 @@ private:
                 idx = i; lo = eff;
             }
         }
+        MemoryEntry evicted = std::move(mems_[idx]);
         mems_.erase(mems_.begin() + idx);
+        return evicted;
     }
 
     size_t cap_;

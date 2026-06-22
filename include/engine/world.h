@@ -3,6 +3,7 @@
 #include <vector>
 #include <algorithm>
 #include <set>
+#include <map>
 #include <string>
 #include "core/types.h"
 #include "core/pcg32.h"
@@ -43,6 +44,8 @@ struct DeferredTask {
     int32_t importance = 0;       // LOCK 2, computed at dispatch
     uint64_t birth_tick = 0;      // dispatch tick (memory's true timestamp, for decay)
     uint32_t mem_id = 0;
+    uint32_t origin_mem_id = 0;   // belief-lineage root (Step 4): self for ACTION/DREAM,
+                                  // inherited from the heard memory for HEARSAY
     std::string text;             // the free prose to store
 
     bool operator<(const DeferredTask& other) const {
@@ -88,6 +91,14 @@ public:
     // Coinage harvest (v1): terms flagged not-in-dictionary, first-coiner wins. In-memory
     // mirror of the CoinedWords table — lets gates check spread without a DB round-trip.
     std::set<std::string> coined_words;
+
+    // CoinageSpread bookkeeping (Step 4, observational only — not determinism-critical,
+    // doesn't feed any RNG draw or dispatch decision). origin = coiner identity captured at
+    // first coinage; adopters = villagers already credited for this term (coiner included),
+    // so re-use of an already-coined term by the SAME villager isn't logged twice.
+    struct CoinageOrigin { VillagerID coiner = 0; uint16_t coiner_genome = 0; uint64_t birth_tick = 0; };
+    std::map<std::string, CoinageOrigin> coinage_origin;
+    std::map<std::string, std::set<VillagerID>> term_adopters;
 
     // Non-owning IO. Null in headless physics-only runs (Phase 0) -> no cognition, no persistence.
     LlamaBridge* bridge = nullptr;

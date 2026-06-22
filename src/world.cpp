@@ -1,13 +1,28 @@
 #include "engine/world.h"
 #include "cognition/llama_bridge.h" // LlamaBridge, Cognition
-#include "cognition/degradation.h"  // hearsay_hop — degradation + two-segment retell + forced novelty
+#include "cognition/degradation.h"  // hearsay_hop, degrade, content_word_delta
 #include "cognition/coinage.h"      // coined_terms — coinage harvest
-#include "infra/db.h"               // Database::persist_memory
+#include "infra/db.h"               // Database::persist_memory + Step 4 logging
 #include <sstream>
 #include <cstdlib> // std::abs
+#include <cstdio>  // snprintf
 #include <iterator>
 
 namespace tbv {
+
+// Word count, used as CognitionLog's token_count (a rough proxy, not a real LLM tokenizer count
+// — fine for instrumentation, this isn't fed back into anything determinism-critical).
+static int word_count(const std::string& s) {
+    std::istringstream iss(s);
+    std::string w; int n = 0;
+    while (iss >> w) n++;
+    return n;
+}
+
+static std::string hex64(uint64_t h) {
+    char buf[20]; snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
+    return buf;
+}
 
 // ============================================================================
 // tick() — three stages: DISPATCH (one cognition event) -> APPLY (fold back) ->
@@ -70,19 +85,28 @@ void WorldState::dispatch_cognition(VillagerID v) {
     t.birth_tick  = current_tick;
     t.mem_id      = next_mem_id++;
 
+    int32_t hunger_snap = needs[v].hunger, social_snap = needs[v].social, safety_snap = needs[v].safety;
+
     // ---- 2. DREAM (cooldown + lonely-or-roll) — checked before hearsay so it isn't starved. ----
     if (!survival && can_dream) {
         std::vector<std::string> frags;
         const auto& mems = stores[v].all();
         for (size_t k = mems.size(); k-- > 0 && frags.size() < 3; ) frags.push_back(mems[k].text);
         if (!frags.empty()) {
-            t.kind       = TaskKind::DREAM;
-            t.mtype      = MemType::DREAM;
-            t.target     = v;
-            t.fold_tick  = current_tick + 20;
-            t.text       = bridge->dream(v, frags, cseed);
-            t.importance = importance(MemType::DREAM, 0, lowest_need(v), t.mem_id, v, current_tick);
+            t.kind          = TaskKind::DREAM;
+            t.mtype         = MemType::DREAM;
+            t.target        = v;
+            t.origin_mem_id = t.mem_id;                    // self-origin: a dream is a new belief
+            t.fold_tick     = current_tick + 20;
+            t.text          = bridge->dream(v, frags, cseed);
+            t.importance    = importance(MemType::DREAM, 0, lowest_need(v), t.mem_id, v, current_tick);
             last_dream_tick[v] = current_tick;
+            if (db) {
+                std::string frag_blob; for (const auto& f : frags) frag_blob += f;
+                db->log_cognition(run_id, v, current_tick, hex64(fnv64_text(frag_blob)), t.text,
+                                  "DREAM", word_count(t.text), genomes[v].pack(),
+                                  hunger_snap, social_snap, safety_snap, cseed);
+            }
             async_queue.push_back(std::move(t));
             return;
         }
@@ -98,14 +122,27 @@ void WorldState::dispatch_cognition(VillagerID v) {
             // MSG_062 §2: degrade the heard memory -> two-segment retell -> forced novelty.
             // hearsay_hop is the shared engine/gate path (no logic the gate can't see).
             RetellResult rr = hearsay_hop(*bridge, v, *m, genomes[v], current_tick, cseed);
-            t.kind         = TaskKind::HEARSAY;
-            t.mtype        = MemType::HEARSAY;
-            t.target       = src;                          // actor_id = source of the gossip
-            t.source_depth = (uint8_t)(m->source_depth + 1);
-            t.fold_tick    = current_tick + 5;
-            t.text         = rr.out_text;                  // rr.fields / distortion_injected -> HearsayChain (Step 4)
-            t.importance   = importance(MemType::HEARSAY, t.source_depth, lowest_need(v),
-                                        t.mem_id, v, current_tick);
+            t.kind          = TaskKind::HEARSAY;
+            t.mtype         = MemType::HEARSAY;
+            t.target        = src;                          // actor_id = source of the gossip
+            t.source_depth  = (uint8_t)(m->source_depth + 1);
+            t.origin_mem_id = m->origin_mem_id;             // inherit the belief-lineage root
+            t.fold_tick     = current_tick + 5;
+            t.text          = rr.out_text;
+            t.importance    = importance(MemType::HEARSAY, t.source_depth, lowest_need(v),
+                                         t.mem_id, v, current_tick);
+            if (db) {
+                // Re-derive the degraded text the listener actually worked from (pure function
+                // of heard/tick, no RNG — safe to call again here purely for the delta metric).
+                std::string degraded = degrade(*m, current_tick);
+                int delta = content_word_delta(degraded, rr.out_text);
+                db->log_hearsay_chain(run_id, t.origin_mem_id, t.origin_mem_id, t.source_depth,
+                                      src, v, genomes[src].pack(), genomes[v].pack(),
+                                      m->text, rr.out_text, delta, current_tick);
+                db->log_cognition(run_id, v, current_tick, hex64(fnv64_text(degraded)), rr.out_text,
+                                  "HEARSAY", word_count(rr.out_text), genomes[v].pack(),
+                                  hunger_snap, social_snap, safety_snap, cseed);
+            }
             async_queue.push_back(std::move(t));
             return;
         }
@@ -115,10 +152,11 @@ void WorldState::dispatch_cognition(VillagerID v) {
     // ---- 4. ACTION (default + survival path): free thought -> intent -> hybrid resolver. ----
     PerceptionContext ctx = build_perception(v, nbrs, env);
     Cognition c = bridge->infer(v, ctx, cseed);
-    t.kind   = TaskKind::ACTION;
-    t.mtype  = MemType::EXPERIENCE;
-    t.verb   = c.verb;
-    t.target = v;
+    t.kind          = TaskKind::ACTION;
+    t.mtype         = MemType::EXPERIENCE;
+    t.verb          = c.verb;
+    t.target        = v;
+    t.origin_mem_id = t.mem_id;                             // self-origin: a firsthand experience
     if ((c.verb == Verb::GIVE || c.verb == Verb::SPEAK) && !nbrs.empty()) {
         uint32_t pick = (uint32_t)pcg32_random_bounded_r(&pcg32_cognition_state[v], (int32_t)nbrs.size());
         t.target = nbrs[pick];
@@ -126,6 +164,11 @@ void WorldState::dispatch_cognition(VillagerID v) {
     t.fold_tick  = current_tick + 5;
     t.text       = c.thought;
     t.importance = importance(MemType::EXPERIENCE, 0, lowest_need(v), t.mem_id, v, current_tick);
+    if (db) {
+        db->log_cognition(run_id, v, current_tick, hex64(fnv64_text(ctx.situation)), c.thought,
+                          verb_name(c.verb), word_count(c.thought), genomes[v].pack(),
+                          hunger_snap, social_snap, safety_snap, cseed);
+    }
     async_queue.push_back(std::move(t));
 }
 
@@ -174,21 +217,42 @@ void WorldState::apply_task(const DeferredTask& t) {
 
     // Store in the actor's own store (for HEARSAY, the listener v remembers the gossip).
     MemoryEntry e;
-    e.mem_id       = t.mem_id;
-    e.tick         = t.birth_tick;
-    e.actor_id     = (t.kind == TaskKind::HEARSAY) ? t.target : t.villager_id;
-    e.importance   = t.importance;
-    e.type         = t.mtype;
-    e.source_depth = t.source_depth;
-    e.text         = t.text;
-    stores[t.villager_id].add(e, current_tick);
-    if (db) db->persist_memory(run_id, t.villager_id, e);
+    e.mem_id        = t.mem_id;
+    e.tick          = t.birth_tick;
+    e.actor_id      = (t.kind == TaskKind::HEARSAY) ? t.target : t.villager_id;
+    e.importance    = t.importance;
+    e.type          = t.mtype;
+    e.source_depth  = t.source_depth;
+    e.origin_mem_id = t.origin_mem_id;
+    e.text          = t.text;
+    std::optional<MemoryEntry> evicted = stores[t.villager_id].add(e, current_tick);
+    if (db) {
+        db->persist_memory(run_id, t.villager_id, e);
+        db->log_belief_birth(run_id, e.mem_id, e.type, e.tick, e.importance, e.source_depth,
+                             fnv64_text(e.text));
+        if (evicted) db->mark_belief_death(run_id, evicted->mem_id, current_tick, evicted->origin_mem_id);
+    }
 
     // ---- Coinage harvest: flag free-generation tokens absent from the system dictionary.
-    // First coiner wins; the term then rides hearsay/dream/action text naturally. ----
+    // First coiner wins; the term then rides hearsay/dream/action text naturally. Adoption
+    // (a DIFFERENT villager's text reusing an already-coined term, credited once each) feeds
+    // CoinageSpread — observational only, doesn't influence dispatch/RNG. ----
     for (const auto& term : coined_terms(t.text)) {
-        if (coined_words.insert(term).second && db)
-            db->register_coinage(run_id, term, t.villager_id, t.birth_tick);
+        if (coined_words.insert(term).second) {
+            CoinageOrigin origin;
+            origin.coiner = t.villager_id;
+            origin.coiner_genome = genomes[t.villager_id].pack();
+            origin.birth_tick = t.birth_tick;
+            coinage_origin[term] = origin;
+            term_adopters[term].insert(t.villager_id);
+            if (db) db->register_coinage(run_id, term, t.villager_id, t.birth_tick);
+        } else if (term_adopters[term].insert(t.villager_id).second && db) {
+            const CoinageOrigin& origin = coinage_origin[term];
+            const char* ctx = (t.kind == TaskKind::HEARSAY) ? "hearsay"
+                            : (t.kind == TaskKind::DREAM)   ? "dream" : "speech";
+            db->log_coinage_adoption(run_id, term, origin.coiner, origin.coiner_genome,
+                                     origin.birth_tick, t.villager_id, t.birth_tick, ctx);
+        }
     }
 }
 

@@ -54,6 +54,29 @@ static uint64_t world_hash(const tbv::WorldState& w) {
     return h;
 }
 
+// WorldDigest periodic snapshot (Step 4) — shared by --run's 100-tick cadence and the
+// --checkpoint_gate proof. belief_count/avg_importance/max_hearsay_depth are live-state
+// aggregates (decay-aware via effective_importance); genome_dist_hash is an FNV digest over
+// every villager's packed genome (deterministic, villager-id order).
+static void log_digest_snapshot(tbv::Database& db, const tbv::WorldState& w,
+                                const std::string& run_id, uint64_t seed) {
+    using namespace tbv;
+    int belief_count = 0, coined = (int)w.coined_words.size();
+    long long imp_sum = 0; int max_depth = 0;
+    for (uint32_t i = 0; i < MAX_VILLAGERS; ++i) {
+        for (const auto& m : w.stores[i].all()) {
+            belief_count++;
+            imp_sum += CognitiveStore::effective_importance(m, w.current_tick);
+            if (m.type == MemType::HEARSAY && m.source_depth > max_depth) max_depth = m.source_depth;
+        }
+    }
+    int avg_imp = belief_count ? (int)(imp_sum / belief_count) : 0;
+    uint64_t gh = 1469598103934665603ULL;
+    for (uint32_t i = 0; i < MAX_VILLAGERS; ++i) gh = fnv_u64(gh, w.genomes[i].pack());
+    db.log_world_digest(run_id, w.current_tick, seed, world_hash(w), belief_count, coined,
+                        avg_imp, max_depth, gh);
+}
+
 // Phase 1 Re-Cut gate vectors: grounded situation + engine facts.
 static std::vector<tbv::PerceptionContext> phase1_vectors() {
     using namespace tbv;
@@ -75,9 +98,11 @@ int main(int argc, char** argv) {
     bool hearsay_fix = false;
     bool coinage = false;
     bool run_mode = false;
+    bool checkpoint_gate = false;
     int run_n = 1000;
     int p3_n = 600;
     int coin_n = 1000;
+    int ckpt_n = 200;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -90,6 +115,7 @@ int main(int argc, char** argv) {
         if (arg == "--phase3") { phase3 = true; if (i + 1 < argc && argv[i+1][0] != '-') p3_n = std::stoi(argv[++i]); }
         if (arg == "--run")    { run_mode = true; if (i + 1 < argc && argv[i+1][0] != '-') run_n = std::stoi(argv[++i]); }
         if (arg == "--coinage") { coinage = true; if (i + 1 < argc && argv[i+1][0] != '-') coin_n = std::stoi(argv[++i]); }
+        if (arg == "--checkpoint_gate") { checkpoint_gate = true; if (i + 1 < argc && argv[i+1][0] != '-') ckpt_n = std::stoi(argv[++i]); }
     }
 
     // ---- Phase 3 driver: wire cognition into the deterministic tick loop, write the artifact DB. ----
@@ -100,10 +126,12 @@ int main(int argc, char** argv) {
             tbv::Database db("village.db");
             db.init_schema();
             tbv::WorldState world; world.init(seed);
-            world.attach(&bridge, &db, "run_" + std::to_string(seed));
+            std::string run_id = "run_" + std::to_string(seed);
+            world.attach(&bridge, &db, run_id);
             while (world.current_tick < (uint64_t)run_n) {
                 db.log_tick_state(world); // pre-tick snapshot: positions/needs at this tick_id
                 world.tick();
+                if (world.current_tick % 100 == 0) log_digest_snapshot(db, world, run_id, seed);
             }
 
             int exp = 0, hear = 0, dream = 0, maxd = 0;
@@ -221,6 +249,75 @@ int main(int argc, char** argv) {
             std::cout << (deterministic ? "✅ determinism: chain reproduces byte-identical\n"
                                         : "❌ determinism broke\n");
             return (all_drift && all_adjacent && deterministic) ? 0 : 1;
+        } catch (const std::exception& e) {
+            std::cout << "FAIL: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
+    // ---- Checkpoint gate (Step 4): kill-and-restore must reproduce the uninterrupted run.
+    // A runs straight through to N. B runs only to K<N, checkpoints, and is destroyed. C is a
+    // FRESH WorldState (init() defaults, no shared memory with B) that loads B's checkpoint and
+    // finishes K->N. hash(C) must equal hash(A) — restore must lose nothing live. Also hard-
+    // asserts the existing --phase3 200 canonical hash is unperturbed (this instrumentation
+    // must not touch the deterministic core) and that the 4 always-firing MSG_062 tables
+    // (HearsayChain/CognitionLog/BeliefSurvival/WorldDigest) have rows. CoinageSpread is excluded
+    // from the non-empty assert: word adoption is real-text-dependent and can legitimately be 0
+    // in a short/seeded run. ----
+    if (checkpoint_gate) {
+        const int N = ckpt_n, K = 80;
+        std::cout << "Checkpoint Gate: kill-and-restore (" << N << " ticks, checkpoint@" << K << ")\n";
+        try {
+            tbv::LlamaBridge bridge("models/smollm2-360m-instruct-q8_0.gguf");
+
+            tbv::Database db_a(":memory:"); db_a.init_schema();
+            tbv::WorldState a; a.init(seed); a.attach(&bridge, &db_a, "ckg");
+            while (a.current_tick < (uint64_t)N) a.tick();
+            uint64_t hash_a = world_hash(a);
+            log_digest_snapshot(db_a, a, "ckg", seed); // proves WorldDigest end-to-end
+
+            tbv::Database db_b(":memory:"); db_b.init_schema();
+            {
+                tbv::WorldState b; b.init(seed); b.attach(&bridge, &db_b, "ckg");
+                while (b.current_tick < (uint64_t)K) b.tick();
+                db_b.save_checkpoint(b);
+                // b is destroyed here (end of scope) — C must restore with zero shared memory.
+            }
+
+            tbv::WorldState c; c.init(seed); c.attach(&bridge, &db_b, "ckg");
+            bool loaded = db_b.load_checkpoint(c);
+            if (!loaded) { std::cout << "FAIL: load_checkpoint found no row for run_id\n"; return 1; }
+            while (c.current_tick < (uint64_t)N) c.tick();
+            uint64_t hash_c = world_hash(c);
+
+            bool restore_ok = (hash_a == hash_c);
+            std::cout << "hash_uninterrupted=" << std::hex << hash_a
+                      << "  hash_restored=" << hash_c << std::dec << "\n";
+            std::cout << (restore_ok ? "✅ restore: kill-and-restore reproduces the uninterrupted run\n"
+                                      : "❌ restore: checkpoint/restore diverged from ground truth\n");
+
+            // Regression guard: this instrumentation must not perturb the deterministic core.
+            tbv::Database db_r(":memory:"); db_r.init_schema();
+            tbv::WorldState r; r.init(12345); r.attach(&bridge, &db_r, "g");
+            while (r.current_tick < 200) r.tick();
+            uint64_t canonical = 0x567898a5104b509dULL;
+            bool canon_ok = (world_hash(r) == canonical);
+            std::cout << "canonical --phase3 200 hash @seed 12345: " << std::hex << world_hash(r)
+                      << std::dec << (canon_ok ? "  ✅ unchanged\n" : "  ❌ DRIFTED\n");
+
+            int n_hearsay = db_b.count_rows("HearsayChain", "ckg");
+            int n_cog     = db_b.count_rows("CognitionLog", "ckg");
+            int n_belief  = db_b.count_rows("BeliefSurvival", "ckg");
+            int n_coinage = db_b.count_rows("CoinageSpread", "ckg");
+            int n_digest  = db_a.count_rows("WorldDigest", "ckg");
+            bool tables_ok = (n_hearsay > 0 && n_cog > 0 && n_belief > 0 && n_digest > 0);
+            std::cout << "tables: HearsayChain=" << n_hearsay << " CognitionLog=" << n_cog
+                      << " BeliefSurvival=" << n_belief << " CoinageSpread=" << n_coinage
+                      << " WorldDigest=" << n_digest << "\n";
+            std::cout << (tables_ok ? "✅ tables: all 4 always-firing MSG_062 tables non-empty\n"
+                                     : "❌ tables: one or more MSG_062 tables empty\n");
+
+            return (restore_ok && canon_ok && tables_ok) ? 0 : 1;
         } catch (const std::exception& e) {
             std::cout << "FAIL: " << e.what() << "\n";
             return 1;

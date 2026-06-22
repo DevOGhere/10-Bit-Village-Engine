@@ -85,6 +85,28 @@ inline int field_match_count(const HearsayFields& a, const HearsayFields& b) {
     return n;
 }
 
+// Count of alpha tokens (len>2, lowercase) present in `outbound` but absent from `inbound` —
+// HearsayChain's content_word_delta (Step 4): how much NEW content this retelling introduced,
+// vs. carrying the same words forward. Order-insensitive by design (a reordered sentence with
+// no new words is not "new content").
+inline int content_word_delta(const std::string& inbound, const std::string& outbound) {
+    auto tokset = [](const std::string& s) {
+        std::set<std::string> out;
+        std::string cur;
+        auto flush = [&] { if (cur.size() > 2) out.insert(cur); cur.clear(); };
+        for (char c : s) {
+            if (std::isalpha((unsigned char)c)) cur += (char)std::tolower((unsigned char)c);
+            else flush();
+        }
+        flush();
+        return out;
+    };
+    std::set<std::string> in = tokset(inbound), out = tokset(outbound);
+    int delta = 0;
+    for (const auto& w : out) if (!in.count(w)) delta++;
+    return delta;
+}
+
 // Classic edit distance (row-rolled DP). Used by the gate to assert no adjacent hop froze
 // verbatim — the exact failure the prior Levenshtein-endpoints-only design missed.
 inline int levenshtein(const std::string& a, const std::string& b) {
