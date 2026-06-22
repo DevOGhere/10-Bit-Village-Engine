@@ -106,7 +106,7 @@ Cognition LlamaBridge::infer(VillagerID id, const PerceptionContext& pc, uint64_
     return { thought, intent, res.verb, res.source };
 }
 
-std::string LlamaBridge::retell(VillagerID id, const std::string& heard, uint64_t seed) {
+RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard, uint64_t seed) {
     (void)id;
     std::string user = "You overhear someone in the village saying: \"" + heard +
         "\" In your own words, what do you make of it and pass along to others?";
@@ -135,7 +135,12 @@ std::string LlamaBridge::retell(VillagerID id, const std::string& heard, uint64_
     llama_sampler_free(chain);
     llama_batch_free(b);
     llama_memory_seq_rm(mem, 0, -1, -1);
-    return out;
+
+    // Segment 2: structured extraction from the free reconstruction (deterministic).
+    RetellResult rr;
+    rr.out_text = out;
+    rr.fields   = extract_hearsay_fields(out);
+    return rr;
 }
 
 std::string LlamaBridge::dream(VillagerID id, const std::vector<std::string>& fragments, uint64_t seed) {

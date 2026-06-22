@@ -1,5 +1,6 @@
-# Build artifacts
+# Build artifacts (build/, plus build_* variants from QA/cross-arch verification)
 build/
+build_*/
 
 # Vendored upstream — NOT tracked. Cloned at Docker build per vendor/PINNED_COMMIT.txt.
 # Local dev keeps a full checkout here; the pin file (vendor/PINNED_COMMIT.txt) IS tracked.

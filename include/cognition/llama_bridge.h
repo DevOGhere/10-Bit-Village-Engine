@@ -18,6 +18,15 @@ struct Cognition {
     const char* source;    // FLOOR | LLM | URGE
 };
 
+// Result of a hearsay retelling (MSG_062 §2 two-segment).
+// out_text = Segment-1 free reconstruction; fields = Segment-2 structured extraction.
+// distortion_injected is set by the forced-novelty fallback (in hearsay_hop, not here).
+struct RetellResult {
+    std::string out_text;
+    HearsayFields fields;
+    bool distortion_injected = false;
+};
+
 class LlamaBridge {
 public:
     explicit LlamaBridge(const std::string& model_path);
@@ -28,8 +37,9 @@ public:
     // Hybrid cognition: free thought -> free intent -> deterministic resolver.
     Cognition infer(VillagerID id, const PerceptionContext& ctx, uint64_t seed);
 
-    // Phase 2: retell a heard memory through this villager's mind (free, distorting).
-    std::string retell(VillagerID id, const std::string& heard, uint64_t seed);
+    // Phase 2 / MSG_062 §2: retell a heard (pre-degraded) memory through this villager's
+    // mind — free reconstruction (Segment 1) + structured field extraction (Segment 2).
+    RetellResult retell(VillagerID id, const std::string& heard, uint64_t seed);
 
     // Phase 2: recombine memory fragments into a surreal DREAM (free).
     std::string dream(VillagerID id, const std::vector<std::string>& fragments, uint64_t seed);

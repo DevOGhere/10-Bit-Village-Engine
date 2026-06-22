@@ -1,5 +1,6 @@
 #include "engine/world.h"
 #include "cognition/llama_bridge.h" // LlamaBridge, Cognition
+#include "cognition/degradation.h"  // hearsay_hop — degradation + two-segment retell + forced novelty
 #include "cognition/coinage.h"      // coined_terms — coinage harvest
 #include "infra/db.h"               // Database::persist_memory
 #include <sstream>
@@ -94,12 +95,15 @@ void WorldState::dispatch_cognition(VillagerID v) {
         VillagerID src = nbrs[pick];
         const MemoryEntry* m = stores[src].most_salient(current_tick);
         if (m) {
+            // MSG_062 §2: degrade the heard memory -> two-segment retell -> forced novelty.
+            // hearsay_hop is the shared engine/gate path (no logic the gate can't see).
+            RetellResult rr = hearsay_hop(*bridge, v, *m, genomes[v], current_tick, cseed);
             t.kind         = TaskKind::HEARSAY;
             t.mtype        = MemType::HEARSAY;
             t.target       = src;                          // actor_id = source of the gossip
             t.source_depth = (uint8_t)(m->source_depth + 1);
             t.fold_tick    = current_tick + 5;
-            t.text         = bridge->retell(v, m->text, cseed);
+            t.text         = rr.out_text;                  // rr.fields / distortion_injected -> HearsayChain (Step 4)
             t.importance   = importance(MemType::HEARSAY, t.source_depth, lowest_need(v),
                                         t.mem_id, v, current_tick);
             async_queue.push_back(std::move(t));

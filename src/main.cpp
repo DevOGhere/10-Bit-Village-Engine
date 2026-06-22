@@ -6,6 +6,7 @@
 #include "infra/db.h"
 #include "cognition/llama_bridge.h"
 #include "cognition/coinage.h"
+#include "cognition/degradation.h"   // hearsay_hop, levenshtein, extract_hearsay_fields
 
 #include "cognition/resolver.h"
 #include "cognition/cognitive_store.h"
@@ -71,6 +72,7 @@ int main(int argc, char** argv) {
     bool phase1 = false;
     bool phase2 = false;
     bool phase3 = false;
+    bool hearsay_fix = false;
     bool coinage = false;
     bool run_mode = false;
     int run_n = 1000;
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
         }
         if (arg == "--phase1") phase1 = true;
         if (arg == "--phase2") phase2 = true;
+        if (arg == "--hearsay_fix") hearsay_fix = true;
         if (arg == "--phase3") { phase3 = true; if (i + 1 < argc && argv[i+1][0] != '-') p3_n = std::stoi(argv[++i]); }
         if (arg == "--run")    { run_mode = true; if (i + 1 < argc && argv[i+1][0] != '-') run_n = std::stoi(argv[++i]); }
         if (arg == "--coinage") { coinage = true; if (i + 1 < argc && argv[i+1][0] != '-') coin_n = std::stoi(argv[++i]); }
@@ -152,6 +155,78 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- Hearsay-fix gate (MSG_062 §2): memory-degradation + two-segment retell + forced
+    // novelty must break stagnation. 5 seeds x 6-hop chains. Asserts (a) hop-6 drifts from the
+    // seed in >=2 of {actor,action,location}, (b) EVERY adjacent hop differs (no verbatim freeze
+    // — the bug the old endpoints-only Levenshtein missed), (c) same-seed byte-identical. ----
+    if (hearsay_fix) {
+        std::cout << "Hearsay-Fix Gate: degradation + two-segment retell + forced novelty\n";
+        try {
+            tbv::LlamaBridge bridge("models/smollm2-360m-instruct-q8_0.gguf");
+            const int HOPS = 6;
+            const int LEV_MIN = 12;     // min edit distance between adjacent hops (anti-stagnation)
+            const std::string seed_text =
+                "Borin found a glowing apple near the lake behind Brindlemark.";
+
+            // One degraded telephone-chain. Fills `texts` with HOPS+1 entries (seed + each hop).
+            auto chain = [&](uint64_t s, std::vector<std::string>& texts) {
+                tbv::MemoryEntry cur;
+                cur.mem_id = 0; cur.tick = 0; cur.importance = 800;
+                cur.type = tbv::MemType::EXPERIENCE; cur.text = seed_text;
+                texts.push_back(cur.text);
+                for (int hop = 1; hop <= HOPS; ++hop) {
+                    // Deterministic, varied genome per hop -> genome-biased distortion.
+                    tbv::Genome g{ (uint8_t)(hop & 3),        (uint8_t)((hop >> 1) & 3),
+                                   (uint8_t)((s >> hop) & 3),  (uint8_t)((s >> (hop+2)) & 3),
+                                   (uint8_t)(hop % 3) };
+                    uint64_t tick = (uint64_t)hop * 60;        // age the memory so degradation bites
+                    cur.importance = 800 - 120 * hop; if (cur.importance < 100) cur.importance = 100;
+                    tbv::RetellResult rr =
+                        tbv::hearsay_hop(bridge, (tbv::VillagerID)hop, cur, g, tick, s + hop);
+                    texts.push_back(rr.out_text);
+                    cur.mem_id = (uint32_t)hop; cur.tick = tick;
+                    cur.type = tbv::MemType::HEARSAY; cur.source_depth = (uint8_t)hop;
+                    cur.text = rr.out_text;
+                }
+            };
+
+            bool all_drift = true, all_adjacent = true;
+            uint64_t seeds[5] = { seed, seed + 101, seed + 202, seed + 303, seed + 404 };
+            for (int si = 0; si < 5; ++si) {
+                std::vector<std::string> texts;
+                chain(seeds[si], texts);
+                tbv::HearsayFields f0 = tbv::extract_hearsay_fields(texts.front());
+                tbv::HearsayFields fN = tbv::extract_hearsay_fields(texts.back());
+                int changed = (f0.actor != fN.actor) + (f0.action != fN.action)
+                            + (f0.location != fN.location);
+                int min_adj = 1 << 30;
+                for (size_t i = 1; i < texts.size(); ++i)
+                    min_adj = std::min(min_adj, tbv::levenshtein(texts[i-1], texts[i]));
+                bool drift = (changed >= 2), adjacent = (min_adj >= LEV_MIN);
+                std::cout << "seed " << seeds[si] << ": fields_changed=" << changed
+                          << "  min_adjacent_lev=" << min_adj
+                          << (adjacent ? "" : "  <-- STAGNATION") << "\n";
+                if (!drift) all_drift = false;
+                if (!adjacent) all_adjacent = false;
+            }
+
+            std::vector<std::string> t1, t2;
+            chain(seeds[0], t1); chain(seeds[0], t2);
+            bool deterministic = (t1 == t2);
+
+            std::cout << (all_drift ? "✅ drift: hop-6 differs from seed in >=2 fields (all seeds)\n"
+                                    : "❌ drift: insufficient field change on some seed\n");
+            std::cout << (all_adjacent ? "✅ no stagnation: every adjacent hop edit-distance >= threshold\n"
+                                       : "❌ stagnation: a hop pair froze near-verbatim\n");
+            std::cout << (deterministic ? "✅ determinism: chain reproduces byte-identical\n"
+                                        : "❌ determinism broke\n");
+            return (all_drift && all_adjacent && deterministic) ? 0 : 1;
+        } catch (const std::exception& e) {
+            std::cout << "FAIL: " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // ---- Phase 3 gate: same-seed determinism + diff-seed differential + mythology emergence. ----
     if (phase3) {
         std::cout << "Phase 3 Gate: orchestration (" << p3_n << " ticks/run)\n";
@@ -207,7 +282,7 @@ int main(int argc, char** argv) {
                 std::string final_text = seed_mem.text;
                 for (int v = 1; v < N; ++v) {
                     const tbv::MemoryEntry* src = villagers[v - 1].most_salient();
-                    std::string heard = bridge.retell((tbv::VillagerID)v, src->text, s + v);
+                    std::string heard = bridge.retell((tbv::VillagerID)v, src->text, s + v).out_text;
                     tbv::MemoryEntry h;
                     h.mem_id = (uint32_t)v; h.type = tbv::MemType::HEARSAY;
                     h.source_depth = (uint8_t)(src->source_depth + 1);
