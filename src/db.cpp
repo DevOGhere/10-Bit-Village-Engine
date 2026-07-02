@@ -678,4 +678,23 @@ int Database::count_memories(const std::string& run_id) {
     return n;
 }
 
+// Live-DB -> staging-file copy via SQLite's Online Backup API. Never called from a signal
+// handler directly (not async-signal-safe) — the --serve loop calls this at a tick boundary
+// in response to a flag a handler set. Overwrites dest_path with a fresh single-step copy.
+bool Database::backup_to(const std::string& dest_path) {
+    sqlite3* dest = nullptr;
+    if (sqlite3_open(dest_path.c_str(), &dest) != SQLITE_OK) {
+        if (dest) sqlite3_close(dest);
+        return false;
+    }
+    sqlite3_backup* bk = sqlite3_backup_init(dest, "main", db, "main");
+    bool ok = false;
+    if (bk) {
+        ok = (sqlite3_backup_step(bk, -1) == SQLITE_DONE);
+        sqlite3_backup_finish(bk);
+    }
+    sqlite3_close(dest);
+    return ok;
+}
+
 } // namespace tbv

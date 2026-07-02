@@ -65,6 +65,10 @@ public:
     // always a hardcoded literal at the call site, never external input.
     int count_rows(const std::string& table, const std::string& run_id);
 
+    // Online Backup API copy of this live DB to dest_path (Step 5). Called from the --serve
+    // tick loop in response to SIGUSR1/SIGTERM, never from the signal handler itself.
+    bool backup_to(const std::string& dest_path);
+
 private:
     sqlite3* db = nullptr;
 };

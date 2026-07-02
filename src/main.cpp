@@ -12,6 +12,20 @@
 #include "cognition/cognitive_store.h"
 #include <set>
 #include <sstream>
+#include <csignal>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
+// --serve signal handling (Step 5b). Handlers touch ONLY these flags -- async-signal-safety
+// forbids calling SQLite/iostreams/malloc from a handler. Real work happens at the next tick
+// boundary in the --serve loop, which polls and clears these.
+static volatile sig_atomic_t g_backup_requested = 0;
+static volatile sig_atomic_t g_shutdown_requested = 0;
+static void tbv_on_sigusr1(int) { g_backup_requested = 1; }
+static void tbv_on_sigterm(int) { g_shutdown_requested = 1; }
+
+#define TBV_ENGINE_VERSION "65debc3"
 
 // Jaccard token-overlap (lowercase, alpha-only, len>2) — Phase 2 drift metric.
 static std::set<std::string> tok_set(std::string s) {
@@ -99,6 +113,7 @@ int main(int argc, char** argv) {
     bool coinage = false;
     bool run_mode = false;
     bool checkpoint_gate = false;
+    bool serve_mode = false;
     int run_n = 1000;
     int p3_n = 600;
     int coin_n = 1000;
@@ -116,6 +131,63 @@ int main(int argc, char** argv) {
         if (arg == "--run")    { run_mode = true; if (i + 1 < argc && argv[i+1][0] != '-') run_n = std::stoi(argv[++i]); }
         if (arg == "--coinage") { coinage = true; if (i + 1 < argc && argv[i+1][0] != '-') coin_n = std::stoi(argv[++i]); }
         if (arg == "--checkpoint_gate") { checkpoint_gate = true; if (i + 1 < argc && argv[i+1][0] != '-') ckpt_n = std::stoi(argv[++i]); }
+        if (arg == "--serve") serve_mode = true;
+    }
+
+    // ---- --serve (Step 5b): long-running host mode. Infinite tick loop, periodic checkpoint,
+    // SIGUSR1 = on-demand staging backup, SIGTERM = final checkpoint + clean exit. Auto-resumes
+    // from EngineCheckpoint if village.db already has one for this run_id; else fresh init.
+    // Zero changes inside tick()/cognition path -- world_hash surface is untouched. ----
+    if (serve_mode) {
+        uint64_t serve_seed = seed;
+        if (const char* e = std::getenv("TBV_SEED")) serve_seed = std::stoull(e);
+        uint64_t ckpt_every = 500;
+        if (const char* e = std::getenv("TBV_CKPT_EVERY")) ckpt_every = std::stoull(e);
+        const std::string run_id = "serve";
+
+        std::signal(SIGUSR1, tbv_on_sigusr1);
+        std::signal(SIGTERM, tbv_on_sigterm);
+
+        try {
+            tbv::LlamaBridge bridge("models/smollm2-360m-instruct-q8_0.gguf");
+            tbv::Database db("village.db");
+            db.init_schema();
+
+            tbv::WorldState world;
+            world.init(serve_seed);
+            world.attach(&bridge, &db, run_id);
+            bool resumed = db.load_checkpoint(world);
+            std::cout << (resumed ? "resumed from checkpoint at tick " : "fresh boot, seed ")
+                      << (resumed ? world.current_tick : serve_seed) << "\n" << std::flush;
+
+            std::filesystem::create_directories("staging");
+
+            while (!g_shutdown_requested) {
+                world.tick();
+
+                if (world.current_tick % ckpt_every == 0) db.save_checkpoint(world);
+
+                if (g_backup_requested) {
+                    g_backup_requested = 0;
+                    db.save_checkpoint(world);
+                    bool ok = db.backup_to("staging/backup.db");
+                    if (ok) {
+                        std::ofstream marker("staging/backup.done", std::ios::trunc);
+                        marker << "tick=" << world.current_tick
+                               << " engine_version=" TBV_ENGINE_VERSION "\n";
+                    } else {
+                        std::cout << "backup FAILED at tick " << world.current_tick << "\n" << std::flush;
+                    }
+                }
+            }
+
+            db.save_checkpoint(world);
+            std::cout << "shutdown: final checkpoint at tick " << world.current_tick << "\n" << std::flush;
+            return 0;
+        } catch (const std::exception& e) {
+            std::cout << "FAIL: " << e.what() << "\n";
+            return 1;
+        }
     }
 
     // ---- Phase 3 driver: wire cognition into the deterministic tick loop, write the artifact DB. ----
