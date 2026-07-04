@@ -186,10 +186,11 @@ def do_backup():
     return True, tag
 
 
-def read_live_state(last_tick, last_event_tick):
+def read_live_state(last_tick, last_event_tick, last_coin_rowid):
     """Poll village.db for the newest ticked VillagerState rows + any MemoryGraph events
-    since last_event_tick. Read-only; the engine subprocess is the sole writer (WAL handles
-    concurrent readers). Returns None when nothing new exists on either axis.
+    since last_event_tick + any CoinedWords past last_coin_rowid. Read-only; the engine
+    subprocess is the sole writer (WAL handles concurrent readers). Returns None when
+    nothing new exists on any axis.
 
     Positions and events are NOT the same tick counter in practice: cognition dispatch
     fold-back applies actions/hearsay N+5 ticks later and dreams N+20 (Phase 3 design) --
@@ -215,9 +216,18 @@ def read_live_state(last_tick, last_event_tick):
         "FROM MemoryGraph WHERE tick > ? ORDER BY tick, id", (last_event_tick,)
     )
     events = [list(r) for r in cur.fetchall()]
+
+    # CoinedWords has PK(run_id, term) but is a plain rowid table, and rows are only ever
+    # INSERT OR IGNOREd (first-coiner-wins, never updated/deleted) -- rowid is a valid
+    # monotonic cursor for "what's new since last push."
+    cur.execute(
+        "SELECT rowid, term, coiner, birth_tick FROM CoinedWords "
+        "WHERE rowid > ? ORDER BY rowid", (last_coin_rowid,)
+    )
+    coin_rows = cur.fetchall()
     con.close()
 
-    if positions is None and not events:
+    if positions is None and not events and not coin_rows:
         return None
     new_event_tick = events[-1][0] if events else last_event_tick
     return {
@@ -226,7 +236,9 @@ def read_live_state(last_tick, last_event_tick):
         # each event keeps its OWN tick (leading column) -- events applying now can belong to
         # several distinct past ticks at once (fold-back catch-up), never assume msg.tick
         "events": events,
+        "coinages": [[r[1], r[2], r[3]] for r in coin_rows],
         "_last_event_tick": new_event_tick,
+        "_last_coin_rowid": coin_rows[-1][0] if coin_rows else last_coin_rowid,
     }
 
 
@@ -316,12 +328,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         last_tick = -1
         last_event_tick = -1
+        # Coinage snapshot cap: a long run accumulates thousands of coined terms, and a
+        # cursor starting at 0 would dump the entire table into the first frame. Start the
+        # cursor 200 rows back instead -- new spectators see the newest 200 terms, then
+        # stream incrementally. Same connection as the loop's reads (WAL, read-only).
+        last_coin_rowid = 0
+        con = sqlite3.connect(DB_PATH, timeout=1)
+        row = con.execute("SELECT MAX(rowid) FROM CoinedWords").fetchone()
+        con.close()
+        if row and row[0] is not None:
+            last_coin_rowid = max(0, row[0] - 200)
         try:
             while True:
-                state = read_live_state(last_tick, last_event_tick)
+                state = read_live_state(last_tick, last_event_tick, last_coin_rowid)
                 if state is not None:
                     last_tick = state["tick"]
                     last_event_tick = state.pop("_last_event_tick")
+                    last_coin_rowid = state.pop("_last_coin_rowid")
                     send_ws_text_frame(self.connection, json.dumps(state))
                 else:
                     # heartbeat so HF's reverse proxy doesn't idle-time the connection out

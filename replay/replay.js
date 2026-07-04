@@ -155,6 +155,15 @@ function connectLive(url) {
         // Events keep their OWN tick (fold-back catch-up can deliver several past ticks'
         // worth at once) -- do NOT assume they belong to msg.tick, same shape as replay.json.
         for (const ev of msg.events) eventsSorted.push(ev);
+        if (msg.coinages && msg.coinages.length > 0) {
+            // newest-first in the live panel; spread stays null -- the live feed carries the
+            // coinage rows, not the full event-text corpus a spread count is computed over
+            for (const [term, coiner, birth_tick] of msg.coinages) {
+                coinTerms.unshift({ term, coiner, birth_tick, spread: null });
+            }
+            if (coinTerms.length > 300) coinTerms.length = 300; // keep panel + memory bounded
+            renderCoinList();
+        }
         if (positionsByTick.size > LIVE_HISTORY_TICKS) {
             const oldest = Math.min(...positionsByTick.keys());
             positionsByTick.delete(oldest);
@@ -439,7 +448,8 @@ function renderCoinList() {
     for (const c of coinTerms) {
         const div = document.createElement("div");
         div.className = "coin" + (c.spread >= 2 ? " spread" : "");
-        div.innerHTML = `<span class="term">${c.term}</span> — coined by v${c.coiner} @t${c.birth_tick}, spread to ${c.spread} villager(s)`;
+        const spreadNote = c.spread === null ? "" : `, spread to ${c.spread} villager(s)`;
+        div.innerHTML = `<span class="term">${c.term}</span> — coined by v${c.coiner} @t${c.birth_tick}${spreadNote}`;
         coinListEl.appendChild(div);
     }
 }
