@@ -4,10 +4,14 @@ POST /backup + GET /health. Restore-on-boot pulls the latest village.db release 
 the dedicated data repo before the engine starts, so an HF sleep/reschedule resumes the same
 run instead of resetting to tick 0 (the point of Step 4's EngineCheckpoint).
 
-GITHUB_TOKEN is an HF Space secret (env var), never committed. TBV_DATA_REPO defaults to the
-dedicated `10-Bit-Village-Data` repo (MASTER PLAN Step 6: engine repo stays clean, heavy DB
-doesn't trip HF's git-push-triggers-rebuild deploy model).
+GITHUB_TOKEN and TBV_BACKUP_TOKEN are HF Space secrets (env vars), never committed.
+TBV_BACKUP_TOKEN gates POST /backup (Bearer auth, 401 on missing/wrong) -- required per
+MSG_075 §3.5/§5d: the Space's own privacy setting is not a substitute for authenticating
+the one state-mutating route. TBV_DATA_REPO defaults to the dedicated `10-Bit-Village-Data`
+repo (MASTER PLAN Step 6: engine repo stays clean, heavy DB doesn't trip HF's
+git-push-triggers-rebuild deploy model). Releases are pruned to the last 10 (spec §2).
 """
+import hmac
 import http.server
 import json
 import os
@@ -22,6 +26,7 @@ import urllib.request
 PORT = int(os.environ.get("PORT", 7860))
 DATA_REPO = os.environ.get("TBV_DATA_REPO", "DevOGhere/10-Bit-Village-Data")
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
+BACKUP_TOKEN = os.environ.get("TBV_BACKUP_TOKEN", "")
 API = f"https://api.github.com/repos/{DATA_REPO}"
 STAGING_DB = "staging/backup.db"
 STAGING_MARKER = "staging/backup.done"
@@ -113,6 +118,18 @@ def push_world_digest():
     gh_request("PUT", f"{API}/contents/world_digest.json", payload)
 
 
+def prune_old_releases(keep=10):
+    """Keep only the `keep` most recent backup releases (spec §2: retention = keep-last-10).
+    Best-effort -- a failed prune here must not fail the backup that already succeeded."""
+    try:
+        _, body = gh_request("GET", f"{API}/releases?per_page=100")
+        releases = json.loads(body)
+        for old in releases[keep:]:
+            gh_request("DELETE", f"{API}/releases/{old['id']}")
+    except Exception as e:
+        print(f"prune: non-fatal, {e}", flush=True)
+
+
 def do_backup():
     """Signal the engine to stage a fresh backup, then push it as a GitHub Release asset."""
     global last_backup_ts
@@ -142,6 +159,7 @@ def do_backup():
     gh_request("POST", f"{upload_url}?name=village.db", data=blob, raw=True,
                headers={"Content-Type": "application/octet-stream"})
     push_world_digest()
+    prune_old_releases()
     last_backup_ts = time.time()
     return True, tag
 
@@ -166,6 +184,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/backup":
+            # POST /backup mutates external state (creates a GitHub Release) and this
+            # Space's port is reachable by anyone who has the URL -- privacy on the Space
+            # itself is a separate, revocable setting, not a substitute for authenticating
+            # the one state-changing route. TBV_BACKUP_TOKEN gates it; unset means the
+            # endpoint is unusable (fails closed), never silently open.
+            presented = self.headers.get("Authorization", "")
+            expected = f"Bearer {BACKUP_TOKEN}"
+            if not BACKUP_TOKEN or not hmac.compare_digest(presented, expected):
+                self._json(401, {"error": "unauthorized"})
+                return
             ok, info = do_backup()
             self._json(200 if ok else 500, {"ok": ok, "info": info})
         else:
