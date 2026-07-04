@@ -1,8 +1,11 @@
 #pragma once
 // Coinage harvest (v1 Phase: emergent-harvest, not best-of-N — grammar's gone).
-// /usr/share/dict/words is loaded once (function-local static) and used to flag
-// free-generation tokens that aren't real words. No mutation of generation itself —
-// coined terms simply ride hearsay/dream/action text naturally.
+// A system/vendored wordlist is loaded once (function-local static) and used to
+// flag free-generation tokens that aren't real words. No mutation of generation
+// itself — coined terms simply ride hearsay/dream/action text naturally.
+// /usr/share/dict/words exists on macOS dev boxes but NOT on Debian slim (the HF
+// container base) — falls back to the vendored assets/dict_en.txt (CWD-relative,
+// same convention as models/grammars) so the filter isn't a silent no-op at deploy.
 #include <cctype>
 #include <fstream>
 #include <string>
@@ -15,6 +18,7 @@ inline const std::unordered_set<std::string>& dictionary() {
     static const std::unordered_set<std::string> dict = [] {
         std::unordered_set<std::string> d;
         std::ifstream f("/usr/share/dict/words");
+        if (!f.is_open()) f.open("assets/dict_en.txt");
         std::string w;
         while (std::getline(f, w)) {
             for (char& c : w) c = (char)tolower((unsigned char)c);

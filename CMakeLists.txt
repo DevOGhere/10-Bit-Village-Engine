@@ -27,6 +27,11 @@ if(TBV_DEPLOY_TARGET STREQUAL "hf")
     set(GGML_BMI2   ON  CACHE BOOL "" FORCE)
     set(GGML_AVX512 OFF CACHE BOOL "" FORCE)
     set(GGML_METAL  OFF CACHE BOOL "" FORCE)
+    # Static-link ggml/llama for HF builds: Linux's BUILD_SHARED_LIBS defaults ON,
+    # which would otherwise scatter a dozen .so files that the slim runtime image
+    # has to copy + LD_LIBRARY_PATH around. One static binary is simpler and matches
+    # the "baked at build" deploy model (Step 5, packet 075).
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 else()
     message(STATUS "TBV: local dev build — GGML_NATIVE default (Metal on Apple Silicon)")
 endif()

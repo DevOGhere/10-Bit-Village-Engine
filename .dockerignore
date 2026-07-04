@@ -1,0 +1,30 @@
+# Build artifacts (rebuilt fresh inside the image every time)
+build/
+build_hf_test/
+build_local/
+
+# Vendored llama.cpp checkout — the Dockerfile clones its own copy at the pinned
+# commit (vendor/PINNED_COMMIT.txt), never trust the host's local checkout.
+vendor/llama.cpp/
+
+# Model is fetched at build time from HF Hub + sha256-verified, not copied from
+# the (gitignored) local checkout — keeps the Dockerfile 5e/HF-push ready.
+models/
+
+# Local run artifacts / SQLite state — never ship a stale db into the image.
+*.db
+*.db-shm
+*.db-wal
+staging/
+
+# VCS / tooling
+.git/
+.cache/
+.DS_Store
+
+# Misc local-only files
+hash1.txt
+hash2.txt
+phase3_gate.log
+sprites/
+tbv_engine
