@@ -20,12 +20,17 @@ already proven for /health + /backup -- each connection gets its own thread, a l
 push loop fits that model directly, no async runtime needed. GET /status is the literal
 MSG_075 5e-gate route (tick/uptime/last_backup); /health is kept as-is (AGY packet 089:
 functionally equivalent, no need to replace).
+
+Any other GET also serves replay/ (COPYd to ./web at Docker build) as static files, `/` ->
+index.html -- HF loads the Space's own app_port page in an iframe, and without this a real
+visitor just saw the bare {"error": "not found"} from the JSON API instead of the fish tank.
 """
 import base64
 import hashlib
 import hmac
 import http.server
 import json
+import mimetypes
 import os
 import signal
 import socketserver
@@ -37,6 +42,7 @@ import urllib.error
 import urllib.request
 
 PORT = int(os.environ.get("PORT", 7860))
+WEB_ROOT = os.path.abspath("web")  # Dockerfile COPYs replay/ here; absent in local dev runs
 DATA_REPO = os.environ.get("TBV_DATA_REPO", "DevOGhere/10-Bit-Village-Data")
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 BACKUP_TOKEN = os.environ.get("TBV_BACKUP_TOKEN", "")
@@ -273,7 +279,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/ws":
             self.handle_ws_spectator()
         else:
+            self.serve_static()
+
+    def serve_static(self):
+        # Visiting the Space's own page hits this (HF loads app_port's "/" in an iframe) --
+        # without it, a real visitor saw a bare `{"error": "not found"}` instead of the fish
+        # tank (found looking at the actual rendered Space page, not just curling routes).
+        # Serves replay/ (COPYd to ./web in the Dockerfile); 404s cleanly if that dir is
+        # absent, e.g. running supervisor.py directly in local dev without the image build.
+        rel = "index.html" if self.path == "/" else self.path.lstrip("/")
+        full = os.path.abspath(os.path.join(WEB_ROOT, rel))
+        if not full.startswith(WEB_ROOT + os.sep) and full != WEB_ROOT:
+            self._json(403, {"error": "forbidden"})
+            return
+        if not os.path.isfile(full):
             self._json(404, {"error": "not found"})
+            return
+        ctype, _ = mimetypes.guess_type(full)
+        with open(full, "rb") as f:
+            body = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def handle_ws_spectator(self):
         key = self.headers.get("Sec-WebSocket-Key")

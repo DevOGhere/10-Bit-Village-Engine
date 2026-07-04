@@ -58,6 +58,9 @@ COPY --from=builder /src/models/ ./models/
 COPY grammars/ ./grammars/
 COPY assets/ ./assets/
 COPY scripts/supervisor.py ./scripts/supervisor.py
+# Live fish-tank client, served by supervisor.py's static-file fallback (`/` -> index.html) --
+# without this HF's own Space page just showed the bare JSON 404 from the API routes.
+COPY replay/ ./web/
 
 EXPOSE 7860
 

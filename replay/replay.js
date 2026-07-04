@@ -56,13 +56,9 @@ const LIVE_HISTORY_TICKS = 500; // cap kept ticks so a long-running spectator ta
 let liveSocket = null;
 let liveMode = false;
 
-liveBtn.addEventListener("click", () => {
-    if (liveSocket) {
-        liveSocket.close();
-        return;
-    }
-    const url = liveUrlEl.value.trim();
+function connectLive(url) {
     if (!url) return;
+    liveUrlEl.value = url;
     liveMode = true;
     playing = false;
     playBtn.textContent = "Play";
@@ -98,7 +94,24 @@ liveBtn.addEventListener("click", () => {
         scrub.max = tick;
         render();
     };
+}
+
+liveBtn.addEventListener("click", () => {
+    if (liveSocket) {
+        liveSocket.close();
+        return;
+    }
+    connectLive(liveUrlEl.value.trim());
 });
+
+// Auto-connect when this page is actually served BY the Space (supervisor.py's static
+// fallback), not opened as a local file:// -- same-origin, so no URL to type. The static
+// viewer (file://) keeps the manual "Connect" flow, since there's no meaningful same-origin
+// WS target there.
+if (location.protocol !== "file:") {
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    connectLive(`${scheme}//${location.host}/ws`);
+}
 
 fileInput.addEventListener("change", (e) => {
     const file = e.target.files[0];
