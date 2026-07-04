@@ -4,6 +4,25 @@
 const TYPE_NAMES = ["EXPERIENCE", "HEARSAY", "DREAM"];
 const TILE = 16;
 
+// Sprite assets (sliced from sprites/Gemini_Generated_Image_u06tuyu06tuyu06t.png, generated
+// 2026-06-15, never wired in until now). Color assigned by villager_id, not genome -- genome
+// isn't exported to replay.json/the /ws feed today; wiring that through is future work.
+const SPRITE_COLORS = ["green", "blue", "red", "yellow", "purple"];
+const villagerSprites = {};
+let grassTile = null;
+let grassPattern = null;
+for (const c of SPRITE_COLORS) {
+    const img = new Image();
+    img.onload = () => render(); // upgrade from the fallback dot even if view is paused
+    img.src = `sprites/villager_${c}_idle.png`;
+    villagerSprites[c] = img;
+}
+{
+    const img = new Image();
+    img.onload = () => { grassTile = img; render(); };
+    img.src = "sprites/terrain_grass.png";
+}
+
 let data = null;
 let positionsByTick = new Map();
 let eventsSorted = [];
@@ -137,15 +156,19 @@ function load() {
     render();
 }
 
-function villagerColor(vid) {
-    const hue = (vid * 37) % 360;
-    return `hsl(${hue}, 65%, 55%)`;
+function villagerColorName(vid) {
+    return SPRITE_COLORS[vid % SPRITE_COLORS.length];
 }
 
 function drawGrid() {
-    ctx.fillStyle = "#1c1f27";
+    if (grassTile && grassTile.complete && grassTile.naturalWidth > 0) {
+        if (!grassPattern) grassPattern = ctx.createPattern(grassTile, "repeat");
+        ctx.fillStyle = grassPattern;
+    } else {
+        ctx.fillStyle = "#1c1f27"; // fallback until the sprite loads
+    }
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = "#262a34";
+    ctx.strokeStyle = "rgba(0,0,0,0.15)";
     ctx.lineWidth = 1;
     for (let x = 0; x <= data.meta.grid_w; x++) {
         ctx.beginPath();
@@ -163,13 +186,23 @@ function drawGrid() {
 
 function drawVillagers() {
     const villagers = positionsByTick.get(currentTick) || [];
+    // sprites are taller than one grid tile (character art, not a flat token) -- draw
+    // oversized and anchor on the tile's bottom-center so they read as standing in the cell
+    const spriteH = TILE * 1.6;
+    const spriteW = spriteH * (140 / 105);
     for (const v of villagers) {
         const cx = v.x * TILE + TILE / 2;
         const cy = v.y * TILE + TILE / 2;
-        ctx.fillStyle = villagerColor(v.vid);
-        ctx.beginPath();
-        ctx.arc(cx, cy, TILE * 0.32, 0, Math.PI * 2);
-        ctx.fill();
+        const sprite = villagerSprites[villagerColorName(v.vid)];
+        if (sprite && sprite.complete && sprite.naturalWidth > 0) {
+            ctx.drawImage(sprite, cx - spriteW / 2, cy - spriteH * 0.75, spriteW, spriteH);
+        } else {
+            // fallback dot until sprites load
+            ctx.fillStyle = "#8a8a8a";
+            ctx.beginPath();
+            ctx.arc(cx, cy, TILE * 0.32, 0, Math.PI * 2);
+            ctx.fill();
+        }
         if (v.holding) {
             ctx.fillStyle = "#ffd166";
             ctx.beginPath();
