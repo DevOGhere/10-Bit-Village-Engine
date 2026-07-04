@@ -24,6 +24,62 @@ const speedRange = document.getElementById("speedRange");
 const speedLabel = document.getElementById("speedLabel");
 const logEl = document.getElementById("log");
 const coinListEl = document.getElementById("coinList");
+const liveUrlEl = document.getElementById("liveUrl");
+const liveBtn = document.getElementById("liveBtn");
+const liveStatusEl = document.getElementById("liveStatus");
+
+// Step 7 fish tank: same renderer as the static file:// viewer, fed from a WebSocket
+// instead of a static replay.json. Grid size is the engine's fixed constant (32x24,
+// packet 052) -- the live feed doesn't send it, there's only ever one grid shape.
+const LIVE_GRID_W = 32;
+const LIVE_GRID_H = 24;
+const LIVE_HISTORY_TICKS = 500; // cap kept ticks so a long-running spectator tab doesn't leak memory
+let liveSocket = null;
+let liveMode = false;
+
+liveBtn.addEventListener("click", () => {
+    if (liveSocket) {
+        liveSocket.close();
+        return;
+    }
+    const url = liveUrlEl.value.trim();
+    if (!url) return;
+    liveMode = true;
+    playing = false;
+    playBtn.textContent = "Play";
+    data = { meta: { grid_w: LIVE_GRID_W, grid_h: LIVE_GRID_H, ticks: 1 }, positions: [], events: [], coinages: [] };
+    positionsByTick = new Map();
+    eventsSorted = [];
+    coinTerms = [];
+    renderCoinList();
+    liveStatusEl.textContent = "connecting...";
+    liveBtn.textContent = "Disconnect";
+    liveSocket = new WebSocket(url);
+    liveSocket.onopen = () => { liveStatusEl.textContent = "connected"; };
+    liveSocket.onclose = () => { liveStatusEl.textContent = "disconnected"; liveSocket = null; liveBtn.textContent = "Connect"; };
+    liveSocket.onerror = () => { liveStatusEl.textContent = "error"; };
+    liveSocket.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.heartbeat) return; // no tick change, nothing to render
+        const tick = msg.tick;
+        if (msg.positions.length > 0) {
+            positionsByTick.set(tick, msg.positions.map(
+                ([vid, x, y, holding, hunger, social, safety]) => ({ vid, x, y, holding, hunger, social, safety })
+            ));
+        }
+        // Events keep their OWN tick (fold-back catch-up can deliver several past ticks'
+        // worth at once) -- do NOT assume they belong to msg.tick, same shape as replay.json.
+        for (const ev of msg.events) eventsSorted.push(ev);
+        if (positionsByTick.size > LIVE_HISTORY_TICKS) {
+            const oldest = Math.min(...positionsByTick.keys());
+            positionsByTick.delete(oldest);
+        }
+        data.meta.ticks = tick + 1;
+        currentTick = tick;
+        scrub.max = tick;
+        render();
+    };
+});
 
 fileInput.addEventListener("change", (e) => {
     const file = e.target.files[0];

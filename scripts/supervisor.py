@@ -10,13 +10,26 @@ MSG_075 §3.5/§5d: the Space's own privacy setting is not a substitute for auth
 the one state-mutating route. TBV_DATA_REPO defaults to the dedicated `10-Bit-Village-Data`
 repo (MASTER PLAN Step 6: engine repo stays clean, heavy DB doesn't trip HF's
 git-push-triggers-rebuild deploy model). Releases are pruned to the last 10 (spec §2).
+
+Step 7 fish tank: GET /ws is a minimal hand-rolled WebSocket server (RFC6455 handshake +
+text-frame writer, no `websockets` dependency) pushing live VillagerState + MemoryGraph
+events, event-driven on tick change -- not the pre-HF-pivot MSG_062 10Hz binary-spatial
+premise, which real measured throughput (~354 ticks/hour, ~10s/tick) made moot (10Hz would
+push identical frozen state ~100x per real tick change). Reuses the same ThreadingTCPServer
+already proven for /health + /backup -- each connection gets its own thread, a long-lived
+push loop fits that model directly, no async runtime needed. GET /status is the literal
+MSG_075 5e-gate route (tick/uptime/last_backup); /health is kept as-is (AGY packet 089:
+functionally equivalent, no need to replace).
 """
+import base64
+import hashlib
 import hmac
 import http.server
 import json
 import os
 import signal
 import socketserver
+import sqlite3
 import subprocess
 import sys
 import time
@@ -33,9 +46,12 @@ STAGING_MARKER = "staging/backup.done"
 DB_PATH = "village.db"
 BACKUP_TIMEOUT_S = 30
 STALE_AFTER_S = 3600
+SPECTATOR_POLL_S = 2  # well above the real ~10s/tick cadence; still responsive, cheap to poll
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC6455 fixed handshake constant
 
 engine_proc = None
 last_backup_ts = None
+boot_ts = time.time()
 
 
 def gh_request(method, url, data=None, headers=None, raw=False):
@@ -164,6 +180,68 @@ def do_backup():
     return True, tag
 
 
+def read_live_state(last_tick, last_event_tick):
+    """Poll village.db for the newest ticked VillagerState rows + any MemoryGraph events
+    since last_event_tick. Read-only; the engine subprocess is the sole writer (WAL handles
+    concurrent readers). Returns None when nothing new exists on either axis.
+
+    Positions and events are NOT the same tick counter in practice: cognition dispatch
+    fold-back applies actions/hearsay N+5 ticks later and dreams N+20 (Phase 3 design) --
+    confirmed empirically here (VillagerState.tick_id ran ~7 ticks ahead of MemoryGraph.tick
+    mid-run). An exact `WHERE tick = <current position tick>` match would silently miss
+    almost every event. Track the two independently instead."""
+    con = sqlite3.connect(DB_PATH, timeout=1)
+    cur = con.cursor()
+    cur.execute("SELECT MAX(tick_id) FROM VillagerState")
+    row = cur.fetchone()
+    tick = row[0] if row and row[0] is not None else None
+
+    positions = None
+    if tick is not None and tick != last_tick:
+        cur.execute(
+            "SELECT villager_id, pos_x, pos_y, holding_food, hunger, social, safety "
+            "FROM VillagerState WHERE tick_id = ? ORDER BY villager_id", (tick,)
+        )
+        positions = [list(r) for r in cur.fetchall()]
+
+    cur.execute(
+        "SELECT tick, villager_id, actor_id, type, source_depth, importance, text "
+        "FROM MemoryGraph WHERE tick > ? ORDER BY tick, id", (last_event_tick,)
+    )
+    events = [list(r) for r in cur.fetchall()]
+    con.close()
+
+    if positions is None and not events:
+        return None
+    new_event_tick = events[-1][0] if events else last_event_tick
+    return {
+        "tick": tick if positions is not None else last_tick,
+        "positions": positions if positions is not None else [],
+        # each event keeps its OWN tick (leading column) -- events applying now can belong to
+        # several distinct past ticks at once (fold-back catch-up), never assume msg.tick
+        "events": events,
+        "_last_event_tick": new_event_tick,
+    }
+
+
+def ws_accept_key(key):
+    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+
+
+def send_ws_text_frame(sock, text):
+    """RFC6455 unmasked text frame (server->client frames MUST NOT be masked, unlike
+    client->server). No fragmentation -- payloads here are small JSON snapshots."""
+    payload = text.encode("utf-8")
+    length = len(payload)
+    if length <= 125:
+        header = bytes([0x81, length])
+    elif length <= 65535:
+        header = bytes([0x81, 126]) + length.to_bytes(2, "big")
+    else:
+        header = bytes([0x81, 127]) + length.to_bytes(8, "big")
+    sock.sendall(header + payload)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def _json(self, code, payload):
         body = json.dumps(payload).encode()
@@ -179,8 +257,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
             stale = (last_backup_ts is None) or (time.time() - last_backup_ts > STALE_AFTER_S)
             self._json(200 if alive else 503,
                        {"engine_alive": alive, "last_backup_ts": last_backup_ts, "stale": stale})
+        elif self.path == "/status":
+            # Literal MSG_075 5e-gate route (tick/uptime/last_backup). Kept alongside /health
+            # (packet 089: /health already gave equivalent proof) rather than replacing it.
+            tick = None
+            try:
+                con = sqlite3.connect(DB_PATH, timeout=1)
+                row = con.execute("SELECT tick FROM EngineCheckpoint LIMIT 1").fetchone()
+                con.close()
+                tick = row[0] if row else None
+            except sqlite3.Error:
+                pass
+            self._json(200, {"tick": tick, "uptime_s": time.time() - boot_ts,
+                              "last_backup_ts": last_backup_ts})
+        elif self.path == "/ws":
+            self.handle_ws_spectator()
         else:
             self._json(404, {"error": "not found"})
+
+    def handle_ws_spectator(self):
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or self.headers.get("Upgrade", "").lower() != "websocket":
+            self._json(400, {"error": "expected websocket upgrade"})
+            return
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ws_accept_key(key))
+        self.end_headers()
+        last_tick = -1
+        last_event_tick = -1
+        try:
+            while True:
+                state = read_live_state(last_tick, last_event_tick)
+                if state is not None:
+                    last_tick = state["tick"]
+                    last_event_tick = state.pop("_last_event_tick")
+                    send_ws_text_frame(self.connection, json.dumps(state))
+                else:
+                    # heartbeat so HF's reverse proxy doesn't idle-time the connection out
+                    # between real tick changes (~10s apart)
+                    send_ws_text_frame(self.connection, json.dumps({"tick": last_tick, "heartbeat": True}))
+                time.sleep(SPECTATOR_POLL_S)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_POST(self):
         if self.path == "/backup":
@@ -218,6 +338,9 @@ def main():
     signal.signal(signal.SIGTERM, relay_term)
 
     httpd = socketserver.ThreadingTCPServer(("0.0.0.0", PORT), Handler)
+    # /ws connections loop until the client disconnects (could be indefinitely) -- daemon
+    # threads so a live spectator can't block process exit on SIGTERM.
+    httpd.daemon_threads = True
     httpd.serve_forever()
 
 

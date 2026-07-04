@@ -163,6 +163,12 @@ int main(int argc, char** argv) {
             std::filesystem::create_directories("staging");
 
             while (!g_shutdown_requested) {
+                // Step 7 fish-tank fulcrum: --serve previously never wrote VillagerState (only
+                // --run did), so a spectator polling village.db for positions would see a frozen
+                // tank. Additive, observer-only (same idiom as --run's loop) -- does not touch
+                // world_hash / determinism. Unbounded growth over long runs is a known tradeoff,
+                // not solved here; revisit if/when long (weeks) runs make VillagerState huge.
+                db.log_tick_state(world);
                 world.tick();
 
                 if (world.current_tick % ckpt_every == 0) db.save_checkpoint(world);
