@@ -19,6 +19,14 @@ public:
     // Phase 0: Record seed-driven dynamic state per tick to prove determinism
     void log_tick_state(const WorldState& state);
 
+    // --serve mode calls log_tick_state() every tick with no cap (added for Step 7's live
+    // spectator feed) -- at 100 rows/tick this is the dominant growth term for a long-running
+    // Space (~357MB/week, ~18.6GB/year at the real measured ~354 ticks/hour). VillagerState's
+    // only consumers are the live /ws feed (reads the newest tick) and short-window debugging,
+    // neither needs full history. Deletes tick_id < keep_from_tick from both VillagerState and
+    // Ticks; called periodically from --serve, not every tick (DELETE cost scales with rows).
+    void prune_villager_state(uint64_t keep_from_tick);
+
     // Phase 2: append-only persistence of free-text memories (observer interface).
     void persist_memory(const std::string& run_id, VillagerID villager_id, const MemoryEntry& m);
     int  count_memories(const std::string& run_id); // verification only (not used in tick loop)

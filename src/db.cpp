@@ -234,6 +234,25 @@ void Database::log_tick_state(const WorldState& state) {
     sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
 }
 
+void Database::prune_villager_state(uint64_t keep_from_tick) {
+    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+    const char* sqls[] = {
+        "DELETE FROM VillagerState WHERE tick_id < ?;",
+        "DELETE FROM Ticks WHERE tick_id < ?;",
+    };
+    for (const char* sql : sqls) {
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)keep_from_tick);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
+    // reclaim disk space -- otherwise SQLite keeps the freed pages in the file for reuse,
+    // so village.db's on-disk size would never actually shrink after a prune
+    sqlite3_exec(db, "VACUUM;", nullptr, nullptr, nullptr);
+}
+
 void Database::persist_memory(const std::string& run_id, VillagerID villager_id, const MemoryEntry& m) {
     const char* sql =
         "INSERT INTO MemoryGraph (run_id, mem_id, villager_id, tick, actor_id, importance, type, source_depth, origin_mem_id, text) "

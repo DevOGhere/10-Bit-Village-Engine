@@ -143,6 +143,10 @@ int main(int argc, char** argv) {
         if (const char* e = std::getenv("TBV_SEED")) serve_seed = std::stoull(e);
         uint64_t ckpt_every = 500;
         if (const char* e = std::getenv("TBV_CKPT_EVERY")) ckpt_every = std::stoull(e);
+        uint64_t villager_state_keep = 2000; // ticks of raw position history retained
+        if (const char* e = std::getenv("TBV_VILLAGER_STATE_KEEP")) villager_state_keep = std::stoull(e);
+        uint64_t prune_every = 1000; // DELETE cost scales with rows -- don't run every tick
+        if (const char* e = std::getenv("TBV_PRUNE_EVERY")) prune_every = std::stoull(e);
         const std::string run_id = "serve";
 
         std::signal(SIGUSR1, tbv_on_sigusr1);
@@ -172,6 +176,14 @@ int main(int argc, char** argv) {
                 world.tick();
 
                 if (world.current_tick % ckpt_every == 0) db.save_checkpoint(world);
+
+                // Bounded retention (the tradeoff flagged above, resolved): VillagerState
+                // is only ever consumed by the live /ws feed (newest tick) and short-window
+                // debugging, so keeping unbounded history has no real use and a real cost
+                // (~357MB/week at measured throughput). Keep a rolling window instead.
+                if (world.current_tick % prune_every == 0 && world.current_tick > villager_state_keep) {
+                    db.prune_villager_state(world.current_tick - villager_state_keep);
+                }
 
                 if (g_backup_requested) {
                     g_backup_requested = 0;

@@ -77,6 +77,7 @@ const coinListEl = document.getElementById("coinList");
 const liveUrlEl = document.getElementById("liveUrl");
 const liveBtn = document.getElementById("liveBtn");
 const liveStatusEl = document.getElementById("liveStatus");
+const controlsEl = document.getElementById("controls");
 
 // Step 7 fish tank: same renderer as the static file:// viewer, fed from a WebSocket
 // instead of a static replay.json. Grid size is the engine's fixed constant (32x24,
@@ -93,6 +94,11 @@ function connectLive(url) {
     liveMode = true;
     playing = false;
     playBtn.textContent = "Play";
+    // Play/scrub/speed are the static-replay scrubber -- in live mode the WS feed forces
+    // currentTick to the newest tick on every message anyway, so they'd just fight the live
+    // feed and do nothing coherent. Hide them rather than ship a control that looks
+    // interactive but silently does nothing.
+    controlsEl.style.display = "none";
     data = { meta: { grid_w: LIVE_GRID_W, grid_h: LIVE_GRID_H, ticks: 1 }, positions: [], events: [], coinages: [] };
     positionsByTick = new Map();
     eventsSorted = [];
@@ -151,6 +157,9 @@ if (location.protocol !== "file:") {
 fileInput.addEventListener("change", (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    if (liveSocket) liveSocket.close();
+    liveMode = false;
+    controlsEl.style.display = "";
     const reader = new FileReader();
     reader.onload = (ev) => {
         data = JSON.parse(ev.target.result);
