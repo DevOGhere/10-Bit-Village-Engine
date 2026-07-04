@@ -57,10 +57,12 @@ COPY --from=builder /src/build/tbv_engine ./tbv_engine
 COPY --from=builder /src/models/ ./models/
 COPY grammars/ ./grammars/
 COPY assets/ ./assets/
+COPY scripts/supervisor.py ./scripts/supervisor.py
 
 EXPOSE 7860
 
-# Placeholder entrypoint until Step 6 wires supervisor.py (owns port 7860,
-# spawns the engine, handles /backup + /health). --serve is the real engine
-# mode built in Step 5b; runnable standalone today for the 5c gate.
-CMD ["./tbv_engine", "--serve"]
+# supervisor.py (Step 6) owns port 7860: restores village.db from the latest
+# 10-Bit-Village-Data release on boot, spawns `./tbv_engine --serve`, and
+# exposes POST /backup + GET /health. GITHUB_TOKEN is supplied as an HF Space
+# secret at runtime, never baked into the image.
+CMD ["python3", "scripts/supervisor.py"]
