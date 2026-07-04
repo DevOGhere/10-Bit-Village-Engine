@@ -9,19 +9,49 @@ const TILE = 16;
 // isn't exported to replay.json/the /ws feed today; wiring that through is future work.
 const SPRITE_COLORS = ["green", "blue", "red", "yellow", "purple"];
 const villagerSprites = {};
+const eatingSprites = {};
 let grassTile = null;
 let grassPattern = null;
+// Draw itself runs continuously in frame() regardless of load state (checks .complete each
+// frame and falls back to a dot until then), so these onload handlers only need to update
+// state, not force a redraw.
 for (const c of SPRITE_COLORS) {
     const img = new Image();
-    img.onload = () => render(); // upgrade from the fallback dot even if view is paused
     img.src = `sprites/villager_${c}_idle.png`;
     villagerSprites[c] = img;
 }
+// only 4/5 colors have a distinct eating pose in the source sheet (purple's slot is a
+// mislabeled duplicate of idle) -- villagerSprites[c] is the honest fallback for purple
+for (const c of ["green", "blue", "red", "yellow"]) {
+    const img = new Image();
+    img.src = `sprites/eating_${c}.png`;
+    eatingSprites[c] = img;
+}
 {
     const img = new Image();
-    img.onload = () => { grassTile = img; render(); };
+    img.onload = () => { grassTile = img; };
     img.src = "sprites/terrain_grass.png";
 }
+
+// Event-type cue icons (small floating overlays -- "small visual cues" section of the
+// sprite sheet). Shown briefly above a villager when a new event involving them lands,
+// so a viewer can actually see cognition happening instead of just a static crowd.
+const CUE_ICONS = {};
+for (const [type, file] of [["EXPERIENCE", "cue_thought.png"], ["HEARSAY", "cue_speech.png"], ["DREAM", "cue_dream.png"]]) {
+    const img = new Image();
+    img.src = `sprites/${file}`;
+    CUE_ICONS[type] = img;
+}
+const CUE_DURATION_MS = 4000;
+const activeCues = new Map(); // vid -> { type, expiresAt }
+
+// Continuous per-villager visual state, decoupled from the sim's real (sparse) position
+// updates -- real movement is genuinely rare (1 cognition dispatch per villager per ~100
+// ticks, ~10s/tick on live infra = ~16min between a given villager's turns), which reads as
+// a dead crowd. visualPos eases toward the real target instead of teleporting, and idleBob
+// gives every villager a small constant sway so the tank always looks alive even between
+// real updates. Purely cosmetic -- never written back, never confused with real state.
+const visualPos = new Map(); // vid -> { x, y } in tile units (floating)
 
 let data = null;
 let positionsByTick = new Map();
@@ -32,6 +62,7 @@ let playing = false;
 let ticksPerSecond = 5;
 let lastFrameTime = 0;
 let accumulator = 0;
+let renderedLogCount = 0; // live mode only: how many of eventsSorted are already in the DOM
 
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
@@ -66,6 +97,10 @@ function connectLive(url) {
     positionsByTick = new Map();
     eventsSorted = [];
     coinTerms = [];
+    renderedLogCount = 0;
+    logEl.innerHTML = "";
+    visualPos.clear();
+    activeCues.clear();
     renderCoinList();
     liveStatusEl.textContent = "connecting...";
     liveBtn.textContent = "Disconnect";
@@ -197,16 +232,35 @@ function drawGrid() {
     }
 }
 
-function drawVillagers() {
+const TWEEN_SPEED = 4; // tile-units/sec the visual position eases toward the real one
+const BOB_AMPLITUDE_PX = 1.4;
+const BOB_SPEED = 1 / 700; // radians/ms, per-vid phase offset keeps the crowd from bobbing in lockstep
+
+function drawVillagers(now, dt) {
     const villagers = positionsByTick.get(currentTick) || [];
     // sprites are taller than one grid tile (character art, not a flat token) -- draw
     // oversized and anchor on the tile's bottom-center so they read as standing in the cell
     const spriteH = TILE * 1.6;
     const spriteW = spriteH * (140 / 105);
+    const seenVids = new Set();
     for (const v of villagers) {
-        const cx = v.x * TILE + TILE / 2;
-        const cy = v.y * TILE + TILE / 2;
-        const sprite = villagerSprites[villagerColorName(v.vid)];
+        seenVids.add(v.vid);
+        let vp = visualPos.get(v.vid);
+        if (!vp) {
+            vp = { x: v.x, y: v.y };
+            visualPos.set(v.vid, vp);
+        }
+        // ease toward the real (sparse) position instead of snapping -- makes the rare
+        // real moves readable as motion instead of a teleport, purely cosmetic
+        const step = TWEEN_SPEED * dt;
+        vp.x += Math.max(-step, Math.min(step, v.x - vp.x));
+        vp.y += Math.max(-step, Math.min(step, v.y - vp.y));
+
+        const bob = Math.sin(now * BOB_SPEED + v.vid) * BOB_AMPLITUDE_PX;
+        const cx = vp.x * TILE + TILE / 2;
+        const cy = vp.y * TILE + TILE / 2 + bob;
+        const colorName = villagerColorName(v.vid);
+        const sprite = (v.holding && eatingSprites[colorName]) ? eatingSprites[colorName] : villagerSprites[colorName];
         if (sprite && sprite.complete && sprite.naturalWidth > 0) {
             ctx.drawImage(sprite, cx - spriteW / 2, cy - spriteH * 0.75, spriteW, spriteH);
         } else {
@@ -216,17 +270,64 @@ function drawVillagers() {
             ctx.arc(cx, cy, TILE * 0.32, 0, Math.PI * 2);
             ctx.fill();
         }
-        if (v.holding) {
+        if (v.holding && !eatingSprites[colorName]) {
+            // purple has no distinct eating pose in the source sheet -- keep the old dot cue
             ctx.fillStyle = "#ffd166";
             ctx.beginPath();
             ctx.arc(cx + TILE * 0.28, cy - TILE * 0.28, TILE * 0.12, 0, Math.PI * 2);
             ctx.fill();
         }
+
+        const cue = activeCues.get(v.vid);
+        if (cue) {
+            if (now > cue.expiresAt) {
+                activeCues.delete(v.vid);
+            } else {
+                const icon = CUE_ICONS[cue.type];
+                const remaining = (cue.expiresAt - now) / CUE_DURATION_MS;
+                ctx.globalAlpha = Math.min(1, remaining * 2.5); // hold, then fade in the last ~40%
+                if (icon && icon.complete && icon.naturalWidth > 0) {
+                    const iw = TILE * 1.3, ih = iw * (icon.naturalHeight / icon.naturalWidth);
+                    ctx.drawImage(icon, cx - iw / 2, cy - spriteH * 0.75 - ih + 2, iw, ih);
+                }
+                ctx.globalAlpha = 1;
+            }
+        }
     }
+    // drop tween state for villagers no longer in frame (avoids an unbounded map on long runs)
+    for (const vid of visualPos.keys()) if (!seenVids.has(vid)) visualPos.delete(vid);
 }
 
 function renderEvents() {
-    // Show events up to currentTick, most recent ~60, newest first, current-tick highlighted.
+    if (liveMode) {
+        // Append-only: a full rebuild (innerHTML = "") on every WS message was the actual
+        // complaint -- it wiped the panel and reset scroll position multiple times a
+        // minute, so nothing was readable. Add only what's new, insert at the top (newest-
+        // first), and never touch existing nodes -- scroll position naturally survives
+        // because content below the insertion point doesn't move.
+        const newOnes = eventsSorted.slice(renderedLogCount);
+        for (const [tick, vid, actor, type, depth, importance, text] of newOnes) {
+            const typeName = TYPE_NAMES[type] || "EXPERIENCE";
+            const div = document.createElement("div");
+            div.className = "event new " + typeName;
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.textContent = `t${tick}  v${vid}  ${typeName}` +
+                (typeName === "HEARSAY" ? ` (depth ${depth}, from v${actor})` : "") +
+                `  imp ${importance}`;
+            const body = document.createElement("div");
+            body.textContent = text;
+            div.appendChild(meta);
+            div.appendChild(body);
+            logEl.insertBefore(div, logEl.firstChild);
+            activeCues.set(vid, { type: typeName, expiresAt: performance.now() + CUE_DURATION_MS });
+        }
+        renderedLogCount = eventsSorted.length;
+        while (logEl.children.length > 200) logEl.removeChild(logEl.lastChild);
+        return;
+    }
+    // Static replay: currentTick can scrub in either direction, so append-only doesn't
+    // apply -- rebuild the filtered view each time (unchanged from before).
     const visible = eventsSorted.filter((e) => e[0] <= currentTick).slice(-60).reverse();
     logEl.innerHTML = "";
     for (const [tick, vid, actor, type, depth, importance, text] of visible) {
@@ -257,17 +358,18 @@ function renderCoinList() {
 }
 
 function render() {
+    // Data-driven side (log/scrub/label) -- called when currentTick or the underlying data
+    // actually changes. Canvas drawing is NOT here anymore: it needs to run every animation
+    // frame (bob/tween are continuous), not just on data change, so it lives in frame() now.
     if (!data) return;
-    drawGrid();
-    drawVillagers();
     renderEvents();
     scrub.value = currentTick;
     tickLabel.textContent = `tick ${currentTick} / ${data.meta.ticks - 1}`;
 }
 
 function frame(now) {
+    const dt = Math.min(0.1, (now - lastFrameTime) / 1000); // clamp so a stalled tab doesn't jump-tween on return
     if (playing && data) {
-        const dt = (now - lastFrameTime) / 1000;
         accumulator += dt * ticksPerSecond;
         while (accumulator >= 1) {
             accumulator -= 1;
@@ -279,6 +381,10 @@ function frame(now) {
             }
         }
         render();
+    }
+    if (data) {
+        drawGrid();
+        drawVillagers(now, dt);
     }
     lastFrameTime = now;
     requestAnimationFrame(frame);

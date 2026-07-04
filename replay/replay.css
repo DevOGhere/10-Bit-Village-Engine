@@ -32,9 +32,11 @@ h1 { font-size: 16px; margin: 0 0 8px 0; }
 h2 { font-size: 13px; margin: 16px 0 6px 0; color: #9aa0ac; text-transform: uppercase; letter-spacing: 0.05em; }
 
 #canvas {
-    border: 1px solid #2a2d36;
+    border: 1px solid #3a3e4a;
+    border-radius: 8px;
     background: #1c1f27;
     image-rendering: pixelated;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
 }
 
 #controls {
@@ -83,6 +85,17 @@ h2 { font-size: 13px; margin: 16px 0 6px 0; color: #9aa0ac; text-transform: uppe
 .event.DREAM      { border-left-color: #b07cd6; background: rgba(176,124,214,0.08); }
 .event .meta { color: #9aa0ac; font-size: 10px; margin-bottom: 2px; }
 .event.current { outline: 1px solid #ffd166; }
+/* live mode: new entries fade in rather than popping in instantly, and a fresh backup of
+   many-at-once (fold-back catch-up) reads as a gentle wave, not a flood */
+.event.new { animation: eventFadeIn 0.5s ease; }
+@keyframes eventFadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+#liveUrl { width: 100%; box-sizing: border-box; margin-bottom: 6px; font-size: 11px; padding: 4px; }
+#liveBtn { width: 100%; margin-bottom: 4px; }
+#liveStatus { font-size: 11px; color: #9aa0ac; }
 
 #coinList {
     font-size: 12px;
