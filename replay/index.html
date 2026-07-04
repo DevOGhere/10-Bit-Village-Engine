@@ -13,12 +13,27 @@
     <input type="text" id="liveUrl" placeholder="wss://your-space.hf.space/ws" size="30">
     <button id="liveBtn">Connect</button>
     <span id="liveStatus">disconnected</span>
-    <h2>Thought / Gossip / Dream log</h2>
+    <div id="focusCard" class="hidden">
+        <div id="focusHead">
+            <span class="avatar" id="focusAvatar"></span>
+            <span id="focusName"></span>
+            <button id="focusClose" title="Stop following">✕</button>
+        </div>
+        <div class="needRow"><span class="needLabel">🍎 food</span><div class="bar"><div class="fill" id="barHunger"></div></div></div>
+        <div class="needRow"><span class="needLabel">💬 company</span><div class="bar"><div class="fill" id="barSocial"></div></div></div>
+        <div class="needRow"><span class="needLabel">🛡️ safety</span><div class="bar"><div class="fill" id="barSafety"></div></div></div>
+        <div id="focusLast"></div>
+    </div>
+    <h2>Village group chat</h2>
     <div id="log"></div>
     <h2>Coined words</h2>
     <div id="coinList"></div>
 </div>
 <div id="main">
+    <div id="statusBar">
+        <span id="statusWorld">…</span>
+        <button id="helpBtn" title="What am I watching?">?</button>
+    </div>
     <canvas id="canvas" width="512" height="384"></canvas>
     <div id="controls">
         <button id="playBtn">Play</button>
@@ -26,6 +41,24 @@
         <span id="tickLabel">tick 0 / 0</span>
         <input type="range" id="speedRange" min="1" max="30" step="1" value="5">
         <span id="speedLabel">5.0 ticks/s</span>
+    </div>
+</div>
+<div id="introOverlay" class="hidden">
+    <div id="introCard">
+        <h1>🐠 What am I watching?</h1>
+        <p>100 tiny AI villagers — each one a 360-million-parameter language model — living
+        continuously in a fully deterministic world. Roughly every 10 seconds, one villager
+        gets its turn to <em>think</em>: free-form, unscripted, its own. The engine turns
+        that thought into an action.</p>
+        <p class="legend">
+            <span class="badge EXPERIENCE">MOMENT</span> a first-hand thought &nbsp;·&nbsp;
+            <span class="badge HEARSAY">GOSSIP</span> retelling <em>someone else's</em> memory —
+            stories mutate with every hop; that drift is mythology forming &nbsp;·&nbsp;
+            <span class="badge DREAM">DREAM</span> a lonely mind recombining its memories
+        </p>
+        <p>Click a villager to follow it. Blue arcs show gossip travelling between minds.
+        Slow is normal — this world is measured in weeks, not minutes.</p>
+        <button id="introDismiss">Watch the tank</button>
     </div>
 </div>
 <script src="replay.js"></script>

@@ -78,6 +78,33 @@ const liveUrlEl = document.getElementById("liveUrl");
 const liveBtn = document.getElementById("liveBtn");
 const liveStatusEl = document.getElementById("liveStatus");
 const controlsEl = document.getElementById("controls");
+const statusBarEl = document.getElementById("statusBar");
+const statusWorldEl = document.getElementById("statusWorld");
+const helpBtn = document.getElementById("helpBtn");
+const introOverlayEl = document.getElementById("introOverlay");
+const introDismissBtn = document.getElementById("introDismiss");
+const focusCardEl = document.getElementById("focusCard");
+const focusAvatarEl = document.getElementById("focusAvatar");
+const focusNameEl = document.getElementById("focusName");
+const focusCloseBtn = document.getElementById("focusClose");
+const focusLastEl = document.getElementById("focusLast");
+const barEls = {
+    hunger: document.getElementById("barHunger"),
+    social: document.getElementById("barSocial"),
+    safety: document.getElementById("barSafety"),
+};
+
+// Click-to-follow state. latestPositions is whatever position snapshot currently drives the
+// canvas (newest WS rows in live mode, currentTick's rows in static replay) so the focus
+// card's needs bars always match what's drawn.
+let focusVid = null;
+let latestPositions = [];
+
+// Gossip arcs: when a HEARSAY event lands live, draw a brief arc from the source villager to
+// the reteller -- rumor propagation is the experiment's whole thesis, make it visible on the
+// tank itself, not only as a "retelling Villager N" subline in the chat.
+const ARC_DURATION_MS = 5000;
+const activeArcs = []; // { from, to, expiresAt }
 
 // Step 7 fish tank: same renderer as the static file:// viewer, fed from a WebSocket
 // instead of a static replay.json. Grid size is the engine's fixed constant (32x24,
@@ -119,9 +146,11 @@ function connectLive(url) {
         if (msg.heartbeat) return; // no tick change, nothing to render
         const tick = msg.tick;
         if (msg.positions.length > 0) {
-            positionsByTick.set(tick, msg.positions.map(
+            const rows = msg.positions.map(
                 ([vid, x, y, holding, hunger, social, safety]) => ({ vid, x, y, holding, hunger, social, safety })
-            ));
+            );
+            positionsByTick.set(tick, rows);
+            latestPositions = rows;
         }
         // Events keep their OWN tick (fold-back catch-up can deliver several past ticks'
         // worth at once) -- do NOT assume they belong to msg.tick, same shape as replay.json.
@@ -246,7 +275,10 @@ const BOB_AMPLITUDE_PX = 1.4;
 const BOB_SPEED = 1 / 700; // radians/ms, per-vid phase offset keeps the crowd from bobbing in lockstep
 
 function drawVillagers(now, dt) {
-    const villagers = positionsByTick.get(currentTick) || [];
+    // Live mode draws the newest snapshot we actually have -- an event-only WS message
+    // advances currentTick without carrying positions, and looking that tick up in
+    // positionsByTick would come back empty and blank the whole tank for a frame.
+    const villagers = liveMode ? latestPositions : (positionsByTick.get(currentTick) || []);
     // sprites are taller than one grid tile (character art, not a flat token) -- draw
     // oversized and anchor on the tile's bottom-center so they read as standing in the cell
     const spriteH = TILE * 1.6;
@@ -269,6 +301,14 @@ function drawVillagers(now, dt) {
         const cx = vp.x * TILE + TILE / 2;
         const cy = vp.y * TILE + TILE / 2 + bob;
         const colorName = villagerColorName(v.vid);
+        if (v.vid === focusVid) {
+            // follow ring under the focused villager's feet, drawn before the sprite
+            ctx.strokeStyle = "#ffd166";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.ellipse(cx, vp.y * TILE + TILE - 1, TILE * 0.55, TILE * 0.28, 0, 0, Math.PI * 2);
+            ctx.stroke();
+        }
         const sprite = (v.holding && eatingSprites[colorName]) ? eatingSprites[colorName] : villagerSprites[colorName];
         if (sprite && sprite.complete && sprite.naturalWidth > 0) {
             ctx.drawImage(sprite, cx - spriteW / 2, cy - spriteH * 0.75, spriteW, spriteH);
@@ -322,6 +362,7 @@ function buildEventNode(tick, vid, actor, type, depth, importance, text, current
     const colorName = villagerColorName(vid);
     const div = document.createElement("div");
     div.className = "event " + typeName + (currentTickHighlight ? " current" : "");
+    div.dataset.vid = vid; // click-to-follow chat filter matches on this
     div.title = `tick ${tick} · importance ${importance}` + (typeName === "HEARSAY" ? ` · hop depth ${depth}` : "");
 
     const head = document.createElement("div");
@@ -365,9 +406,13 @@ function renderEvents() {
         for (const [tick, vid, actor, type, depth, importance, text] of newOnes) {
             const div = buildEventNode(tick, vid, actor, type, depth, importance, text, false);
             div.classList.add("new");
+            if (focusVid !== null && vid !== focusVid) div.classList.add("filtered");
             logEl.insertBefore(div, logEl.firstChild);
             const typeName = TYPE_NAMES[type] || "EXPERIENCE";
             activeCues.set(vid, { type: typeName, expiresAt: performance.now() + CUE_DURATION_MS });
+            if (typeName === "HEARSAY" && actor != null && actor !== vid) {
+                activeArcs.push({ from: actor, to: vid, expiresAt: performance.now() + ARC_DURATION_MS });
+            }
         }
         renderedLogCount = eventsSorted.length;
         while (logEl.children.length > 200) logEl.removeChild(logEl.lastChild);
@@ -379,6 +424,13 @@ function renderEvents() {
     logEl.innerHTML = "";
     for (const [tick, vid, actor, type, depth, importance, text] of visible) {
         logEl.appendChild(buildEventNode(tick, vid, actor, type, depth, importance, text, tick === currentTick));
+    }
+    applyChatFilter();
+}
+
+function applyChatFilter() {
+    for (const el of logEl.children) {
+        el.classList.toggle("filtered", focusVid !== null && parseInt(el.dataset.vid, 10) !== focusVid);
     }
 }
 
@@ -392,12 +444,142 @@ function renderCoinList() {
     }
 }
 
+// Quadratic arc from gossip source to reteller, with a travelling dot for direction --
+// drawn every frame like the villagers, expired entries dropped in place.
+function drawArcs(now) {
+    for (let i = activeArcs.length - 1; i >= 0; i--) {
+        const a = activeArcs[i];
+        if (now > a.expiresAt) { activeArcs.splice(i, 1); continue; }
+        const f = visualPos.get(a.from), t = visualPos.get(a.to);
+        if (!f || !t) continue; // endpoint not on screen (yet) -- keep it, positions may land
+        const x1 = f.x * TILE + TILE / 2, y1 = f.y * TILE + TILE / 2;
+        const x2 = t.x * TILE + TILE / 2, y2 = t.y * TILE + TILE / 2;
+        const lift = Math.min(60, Math.hypot(x2 - x1, y2 - y1) * 0.35) + 14;
+        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 - lift;
+        const rem = (a.expiresAt - now) / ARC_DURATION_MS;
+        ctx.globalAlpha = Math.min(0.85, rem * 2);
+        ctx.strokeStyle = "#5b9bd5";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.quadraticCurveTo(mx, my, x2, y2);
+        ctx.stroke();
+        const p = 1 - rem; // progress 0->1 over the arc's lifetime
+        const bx = (1 - p) * (1 - p) * x1 + 2 * (1 - p) * p * mx + p * p * x2;
+        const by = (1 - p) * (1 - p) * y1 + 2 * (1 - p) * p * my + p * p * y2;
+        ctx.fillStyle = "#bcd9f2";
+        ctx.beginPath();
+        ctx.arc(bx, by, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+// ---- click-to-follow ----
+
+canvas.addEventListener("click", (e) => {
+    if (!data) return;
+    const rect = canvas.getBoundingClientRect();
+    const tx = (e.clientX - rect.left) / TILE;
+    const ty = (e.clientY - rect.top) / TILE;
+    // hit-test against visualPos (where sprites are actually drawn), nearest within ~1 tile
+    let best = null, bestD = 1.1;
+    for (const [vid, vp] of visualPos) {
+        const d = Math.hypot(vp.x + 0.5 - tx, vp.y + 0.5 - ty);
+        if (d < bestD) { bestD = d; best = vid; }
+    }
+    setFocus(best); // empty-grass click -> null -> clears focus
+});
+
+focusCloseBtn.addEventListener("click", () => setFocus(null));
+
+function setFocus(vid) {
+    focusVid = vid;
+    if (vid === null) {
+        focusCardEl.classList.add("hidden");
+    } else {
+        focusCardEl.classList.remove("hidden");
+        const colorName = villagerColorName(vid);
+        focusAvatarEl.style.background = VILLAGER_COLOR_HEX[colorName] || "#888";
+        focusNameEl.textContent = `Villager ${vid}`;
+        updateFocusCard();
+    }
+    applyChatFilter();
+}
+
+function updateFocusCard() {
+    if (focusVid === null) return;
+    const row = latestPositions.find((v) => v.vid === focusVid);
+    if (row) {
+        // needs are engine fixed-point satiety values: 100000 = fully met (types.h
+        // FIXED_POINT_ONE), so /1000 = percent-full for the bar
+        for (const [key, el] of Object.entries(barEls)) {
+            const pct = Math.max(0, Math.min(100, row[key] / 1000));
+            el.style.width = pct + "%";
+            el.style.background = pct < 25 ? "#d9635c" : pct < 55 ? "#f0ad4e" : "#5fb878";
+        }
+    }
+    for (let i = eventsSorted.length - 1; i >= 0; i--) {
+        const [, vid, , type, , , text] = eventsSorted[i];
+        if (vid === focusVid) {
+            const label = TYPE_LABEL[TYPE_NAMES[type]] || "MOMENT";
+            focusLastEl.textContent = `${label}: “${text.length > 160 ? text.slice(0, 160) + "…" : text}”`;
+            return;
+        }
+    }
+    focusLastEl.textContent = "hasn't said anything yet";
+}
+
+// ---- experiment status strip (live/served mode only) ----
+
+function fmtDuration(s) {
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+    return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+async function pollStatus() {
+    try {
+        const r = await fetch("/status");
+        const s = await r.json();
+        const parts = [`🌍 tick ${s.tick != null ? s.tick.toLocaleString() : "—"}`,
+                       `container up ${fmtDuration(s.uptime_s)}`];
+        parts.push(s.last_backup_ts != null
+            ? `last backup ${fmtDuration(Date.now() / 1000 - s.last_backup_ts)} ago`
+            : "no backup yet");
+        statusWorldEl.textContent = parts.join(" · ");
+    } catch {
+        statusWorldEl.textContent = "status unavailable";
+    }
+}
+
+// ---- first-visit intro overlay ----
+
+const INTRO_SEEN_KEY = "tbv_intro_seen";
+helpBtn.addEventListener("click", () => introOverlayEl.classList.remove("hidden"));
+introDismissBtn.addEventListener("click", () => {
+    introOverlayEl.classList.add("hidden");
+    try { localStorage.setItem(INTRO_SEEN_KEY, "1"); } catch { /* private mode */ }
+});
+let introSeen = false;
+try { introSeen = localStorage.getItem(INTRO_SEEN_KEY) === "1"; } catch { /* private mode */ }
+if (!introSeen) introOverlayEl.classList.remove("hidden");
+
+if (location.protocol !== "file:") {
+    pollStatus();
+    setInterval(pollStatus, 30000);
+} else {
+    // file:// static replay has no server to ask -- the strip would just say "unavailable"
+    statusBarEl.classList.add("hidden");
+}
+
 function render() {
     // Data-driven side (log/scrub/label) -- called when currentTick or the underlying data
     // actually changes. Canvas drawing is NOT here anymore: it needs to run every animation
     // frame (bob/tween are continuous), not just on data change, so it lives in frame() now.
     if (!data) return;
+    if (!liveMode) latestPositions = positionsByTick.get(currentTick) || [];
     renderEvents();
+    updateFocusCard();
     scrub.value = currentTick;
     tickLabel.textContent = `tick ${currentTick} / ${data.meta.ticks - 1}`;
 }
@@ -420,6 +602,7 @@ function frame(now) {
     if (data) {
         drawGrid();
         drawVillagers(now, dt);
+        drawArcs(now);
     }
     lastFrameTime = now;
     requestAnimationFrame(frame);

@@ -125,3 +125,72 @@ h2 { font-size: 13px; margin: 16px 0 6px 0; color: #9aa0ac; text-transform: uppe
 #coinList .coin.spread { color: #5fb878; }
 
 #speedLabel { font-size: 12px; color: #9aa0ac; min-width: 60px; }
+
+.hidden { display: none !important; }
+
+/* ---- experiment status strip (live mode only) ---- */
+#statusBar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: #c9cdd6;
+    background: #1c1f27;
+    border: 1px solid #2a2d36;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-variant-numeric: tabular-nums;
+}
+#helpBtn {
+    background: #2a2d36; color: #e6e6e6; border: 1px solid #3a3e4a;
+    border-radius: 50%; width: 22px; height: 22px; cursor: pointer;
+    font-size: 12px; line-height: 1; flex-shrink: 0;
+}
+#helpBtn:hover { background: #3a3e4a; }
+
+/* ---- villager focus card ---- */
+#focusCard {
+    margin-top: 10px;
+    border: 1px solid #3a3e4a;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #1c1f27;
+}
+#focusHead { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+#focusName { font-weight: 600; font-size: 13px; flex: 1; }
+#focusClose {
+    background: none; border: none; color: #9aa0ac; cursor: pointer; font-size: 12px;
+}
+#focusClose:hover { color: #e6e6e6; }
+.needRow { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.needLabel { font-size: 11px; color: #9aa0ac; width: 82px; flex-shrink: 0; }
+.bar {
+    flex: 1; height: 8px; background: #2a2d36; border-radius: 4px; overflow: hidden;
+}
+.bar .fill {
+    height: 100%; border-radius: 4px; background: #5fb878;
+    transition: width 0.6s ease, background 0.6s ease;
+}
+#focusLast { font-size: 11.5px; color: #b8bdc7; margin-top: 6px; font-style: italic; line-height: 1.4; }
+.event.filtered { display: none; }
+
+/* ---- first-visit intro overlay ---- */
+#introOverlay {
+    position: fixed; inset: 0; z-index: 10;
+    background: rgba(10, 12, 16, 0.72);
+    display: flex; align-items: center; justify-content: center;
+}
+#introCard {
+    max-width: 460px; margin: 20px;
+    background: #1c1f27; border: 1px solid #3a3e4a; border-radius: 12px;
+    padding: 22px 26px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+}
+#introCard h1 { font-size: 18px; margin: 0 0 10px 0; }
+#introCard p { font-size: 13px; line-height: 1.55; color: #c9cdd6; margin: 0 0 10px 0; }
+#introCard .legend { line-height: 2; }
+#introDismiss {
+    background: #5fb878; color: #14161c; border: none; border-radius: 6px;
+    padding: 8px 16px; font-size: 13px; font-weight: 700; cursor: pointer; margin-top: 4px;
+}
+#introDismiss:hover { filter: brightness(1.1); }
