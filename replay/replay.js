@@ -307,6 +307,53 @@ function drawVillagers(now, dt) {
     for (const vid of visualPos.keys()) if (!seenVids.has(vid)) visualPos.delete(vid);
 }
 
+// Villager colors as real hex (not CSS color names) so the chat-avatar dot matches the
+// sprite exactly. Approximate swatches pulled from the sprite art itself.
+const VILLAGER_COLOR_HEX = { green: "#5fb878", blue: "#5b9bd5", red: "#d9635c", yellow: "#f0ad4e", purple: "#b07cd6" };
+const TYPE_LABEL = { EXPERIENCE: "MOMENT", HEARSAY: "GOSSIP", DREAM: "DREAM" };
+
+function buildEventNode(tick, vid, actor, type, depth, importance, text, currentTickHighlight) {
+    // Chat-message shape instead of a debug-log line ("t136 v36 HEARSAY (depth 2, from v85)
+    // imp 509" reads like a log dump, not something a casual viewer parses at a glance).
+    // Internal engine metrics (depth/importance/tick) move to a hover tooltip instead of
+    // being printed inline -- a group-chat viewer cares about who said what, not the
+    // salience score behind it.
+    const typeName = TYPE_NAMES[type] || "EXPERIENCE";
+    const colorName = villagerColorName(vid);
+    const div = document.createElement("div");
+    div.className = "event " + typeName + (currentTickHighlight ? " current" : "");
+    div.title = `tick ${tick} · importance ${importance}` + (typeName === "HEARSAY" ? ` · hop depth ${depth}` : "");
+
+    const head = document.createElement("div");
+    head.className = "eventHead";
+    const avatar = document.createElement("span");
+    avatar.className = "avatar";
+    avatar.style.background = VILLAGER_COLOR_HEX[colorName] || "#888";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = `Villager ${vid}`;
+    const badge = document.createElement("span");
+    badge.className = "badge " + typeName;
+    badge.textContent = TYPE_LABEL[typeName] || typeName;
+    head.appendChild(avatar);
+    head.appendChild(name);
+    head.appendChild(badge);
+    if (typeName === "HEARSAY") {
+        const via = document.createElement("span");
+        via.className = "via";
+        via.textContent = `↺ retelling Villager ${actor}`;
+        head.appendChild(via);
+    }
+
+    const body = document.createElement("div");
+    body.className = "bubble";
+    body.textContent = text;
+
+    div.appendChild(head);
+    div.appendChild(body);
+    return div;
+}
+
 function renderEvents() {
     if (liveMode) {
         // Append-only: a full rebuild (innerHTML = "") on every WS message was the actual
@@ -316,19 +363,10 @@ function renderEvents() {
         // because content below the insertion point doesn't move.
         const newOnes = eventsSorted.slice(renderedLogCount);
         for (const [tick, vid, actor, type, depth, importance, text] of newOnes) {
-            const typeName = TYPE_NAMES[type] || "EXPERIENCE";
-            const div = document.createElement("div");
-            div.className = "event new " + typeName;
-            const meta = document.createElement("div");
-            meta.className = "meta";
-            meta.textContent = `t${tick}  v${vid}  ${typeName}` +
-                (typeName === "HEARSAY" ? ` (depth ${depth}, from v${actor})` : "") +
-                `  imp ${importance}`;
-            const body = document.createElement("div");
-            body.textContent = text;
-            div.appendChild(meta);
-            div.appendChild(body);
+            const div = buildEventNode(tick, vid, actor, type, depth, importance, text, false);
+            div.classList.add("new");
             logEl.insertBefore(div, logEl.firstChild);
+            const typeName = TYPE_NAMES[type] || "EXPERIENCE";
             activeCues.set(vid, { type: typeName, expiresAt: performance.now() + CUE_DURATION_MS });
         }
         renderedLogCount = eventsSorted.length;
@@ -340,19 +378,7 @@ function renderEvents() {
     const visible = eventsSorted.filter((e) => e[0] <= currentTick).slice(-60).reverse();
     logEl.innerHTML = "";
     for (const [tick, vid, actor, type, depth, importance, text] of visible) {
-        const div = document.createElement("div");
-        const typeName = TYPE_NAMES[type] || "EXPERIENCE";
-        div.className = "event " + typeName + (tick === currentTick ? " current" : "");
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = `t${tick}  v${vid}  ${typeName}` +
-            (typeName === "HEARSAY" ? ` (depth ${depth}, from v${actor})` : "") +
-            `  imp ${importance}`;
-        const body = document.createElement("div");
-        body.textContent = text;
-        div.appendChild(meta);
-        div.appendChild(body);
-        logEl.appendChild(div);
+        logEl.appendChild(buildEventNode(tick, vid, actor, type, depth, importance, text, tick === currentTick));
     }
 }
 
