@@ -73,8 +73,8 @@ def restore_on_boot():
 
 
 def push_world_digest():
-    """Commit a lightweight WorldDigest JSON dump to the data repo for quick diffing (does
-    not touch the heavy release asset path)."""
+    """Commit a lightweight digest JSON dump to the data repo for quick diffing (does not
+    touch the heavy release asset path)."""
     import sqlite3
     con = sqlite3.connect(STAGING_DB)
     cur = con.cursor()
@@ -83,12 +83,20 @@ def push_world_digest():
         "max_hearsay_depth, genome_dist_hash FROM WorldDigest ORDER BY tick DESC LIMIT 1"
     )
     row = cur.fetchone()
+    if row is not None:
+        cols = ["run_id", "tick", "seed", "world_hash", "belief_count", "coined_terms",
+                "avg_importance", "max_hearsay_depth", "genome_dist_hash"]
+        digest = dict(zip(cols, row))
+    else:
+        # --serve mode never calls log_digest_snapshot() (that's a --run-mode-only cadence),
+        # so WorldDigest is always empty here. Fall back to EngineCheckpoint, which --serve
+        # always writes -- gives at least run_id/tick instead of silently pushing nothing.
+        cur.execute("SELECT run_id, tick FROM EngineCheckpoint ORDER BY tick DESC LIMIT 1")
+        ckpt_row = cur.fetchone()
+        digest = {"run_id": ckpt_row[0], "tick": ckpt_row[1]} if ckpt_row else {}
     con.close()
-    if row is None:
+    if not digest:
         return
-    cols = ["run_id", "tick", "seed", "world_hash", "belief_count", "coined_terms",
-            "avg_importance", "max_hearsay_depth", "genome_dist_hash"]
-    digest = dict(zip(cols, row))
     content_b64 = __import__("base64").b64encode(json.dumps(digest, indent=2).encode()).decode()
 
     sha = None
