@@ -48,12 +48,20 @@ def restore_on_boot():
     if not TOKEN:
         print("restore: no GITHUB_TOKEN set, skipping (fresh boot)", flush=True)
         return
+    # NOT /releases/latest -- GitHub defines "latest" as the most recent NON-prerelease,
+    # non-draft release, and every backup release here is created with prerelease=True
+    # (coarse-cadence internal artifacts, not public cuts). /releases/latest would silently
+    # 404-equivalent forever. List instead and take releases[0] (API returns newest-first).
     try:
-        _, body = gh_request("GET", f"{API}/releases/latest")
+        _, body = gh_request("GET", f"{API}/releases?per_page=1")
     except urllib.error.HTTPError as e:
-        print(f"restore: {'no releases yet' if e.code == 404 else f'API error {e.code}'}, fresh boot", flush=True)
+        print(f"restore: API error {e.code}, fresh boot", flush=True)
         return
-    release = json.loads(body)
+    releases = json.loads(body)
+    if not releases:
+        print("restore: no releases yet, fresh boot", flush=True)
+        return
+    release = releases[0]
     asset = next((a for a in release.get("assets", []) if a["name"] == "village.db"), None)
     if not asset:
         print("restore: latest release has no village.db asset, fresh boot", flush=True)
