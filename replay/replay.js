@@ -80,6 +80,13 @@ const liveStatusEl = document.getElementById("liveStatus");
 const controlsEl = document.getElementById("controls");
 const statusBarEl = document.getElementById("statusBar");
 const statusWorldEl = document.getElementById("statusWorld");
+const titleEl = document.getElementById("title");
+const taglineEl = document.getElementById("tagline");
+const connDotEl = document.getElementById("connDot");
+const devControlsEl = document.getElementById("devControls");
+const pulseEl = document.getElementById("pulse");
+const pulseCountsEl = document.getElementById("pulseCounts");
+const pulseTopEl = document.getElementById("pulseTop");
 const helpBtn = document.getElementById("helpBtn");
 const introOverlayEl = document.getElementById("introOverlay");
 const introDismissBtn = document.getElementById("introDismiss");
@@ -106,6 +113,20 @@ let latestPositions = [];
 const ARC_DURATION_MS = 5000;
 const activeArcs = []; // { from, to, expiresAt }
 
+// Village pulse: run-so-far counts. Events are accurate run totals (the WS catch-up frame
+// replays the full MemoryGraph history); the coinage snapshot is capped at the newest 200,
+// so if the first batch arrives full we can only honestly say "200+".
+const pulseStats = { MOMENT: 0, GOSSIP: 0, DREAM: 0, COINED: 0 };
+const speakCounts = new Map(); // vid -> events attributed to them
+let coinSnapshotTruncated = false;
+let firstCoinBatch = true;
+
+// One pending reconnect timer at a time; manual connects cancel it. A socket that was
+// genuinely open retries fast (blip recovery); one that never opened (Space rebuilding,
+// bad URL) backs off long so we don't hammer a down host.
+let reconnectTimer = null;
+let socketWasOpen = false;
+
 // Step 7 fish tank: same renderer as the static file:// viewer, fed from a WebSocket
 // instead of a static replay.json. Grid size is the engine's fixed constant (32x24,
 // packet 052) -- the live feed doesn't send it, there's only ever one grid shape.
@@ -117,6 +138,7 @@ let liveMode = false;
 
 function connectLive(url) {
     if (!url) return;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     liveUrlEl.value = url;
     liveMode = true;
     playing = false;
@@ -135,11 +157,38 @@ function connectLive(url) {
     visualPos.clear();
     activeCues.clear();
     renderCoinList();
+    pulseStats.MOMENT = 0; pulseStats.GOSSIP = 0; pulseStats.DREAM = 0; pulseStats.COINED = 0;
+    speakCounts.clear();
+    coinSnapshotTruncated = false;
+    firstCoinBatch = true;
+    renderPulse();
     liveStatusEl.textContent = "connecting...";
     liveBtn.textContent = "Disconnect";
+    socketWasOpen = false;
     liveSocket = new WebSocket(url);
-    liveSocket.onopen = () => { liveStatusEl.textContent = "connected"; };
-    liveSocket.onclose = () => { liveStatusEl.textContent = "disconnected"; liveSocket = null; liveBtn.textContent = "Connect"; };
+    liveSocket.onopen = () => {
+        socketWasOpen = true;
+        liveStatusEl.textContent = "connected";
+        connDotEl.classList.add("connected");
+        connDotEl.title = "connected";
+    };
+    liveSocket.onclose = () => {
+        liveSocket = null;
+        liveBtn.textContent = "Connect";
+        connDotEl.classList.remove("connected");
+        // Served page = unattended public exhibit; never leave it permanently dead on a WS
+        // drop. Reconnect resets state on purpose -- the server replays event history from
+        // its own cursors, so appending across connections would duplicate everything.
+        if (location.protocol !== "file:") {
+            const delay = socketWasOpen ? 5000 : 30000;
+            liveStatusEl.textContent = "reconnecting...";
+            connDotEl.title = "reconnecting";
+            reconnectTimer = setTimeout(() => connectLive(url), delay);
+        } else {
+            liveStatusEl.textContent = "disconnected";
+            connDotEl.title = "disconnected";
+        }
+    };
     liveSocket.onerror = () => { liveStatusEl.textContent = "error"; };
     liveSocket.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
@@ -162,7 +211,13 @@ function connectLive(url) {
                 coinTerms.unshift({ term, coiner, birth_tick, spread: null });
             }
             if (coinTerms.length > 300) coinTerms.length = 300; // keep panel + memory bounded
+            pulseStats.COINED += msg.coinages.length;
+            // the server's connect-time snapshot is capped at the newest 200 -- a full first
+            // batch means older terms exist that we never saw, so the count is a floor
+            if (firstCoinBatch && msg.coinages.length === 200) coinSnapshotTruncated = true;
+            firstCoinBatch = false;
             renderCoinList();
+            renderPulse();
         }
         if (positionsByTick.size > LIVE_HISTORY_TICKS) {
             const oldest = Math.min(...positionsByTick.keys());
@@ -422,7 +477,10 @@ function renderEvents() {
             if (typeName === "HEARSAY" && actor != null && actor !== vid) {
                 activeArcs.push({ from: actor, to: vid, expiresAt: performance.now() + ARC_DURATION_MS });
             }
+            pulseStats[TYPE_LABEL[typeName] || "MOMENT"]++;
+            speakCounts.set(vid, (speakCounts.get(vid) || 0) + 1);
         }
+        if (newOnes.length > 0) renderPulse();
         renderedLogCount = eventsSorted.length;
         while (logEl.children.length > 200) logEl.removeChild(logEl.lastChild);
         return;
@@ -540,6 +598,30 @@ function updateFocusCard() {
     focusLastEl.textContent = "hasn't said anything yet";
 }
 
+// ---- village pulse (run-so-far stats, served mode) ----
+
+const PULSE_TILES = [["MOMENT", "💭 moments"], ["GOSSIP", "🗣️ gossips"], ["DREAM", "🌙 dreams"], ["COINED", "✨ words coined"]];
+
+function renderPulse() {
+    if (pulseEl.classList.contains("hidden")) return;
+    pulseCountsEl.innerHTML = "";
+    for (const [key, label] of PULSE_TILES) {
+        const div = document.createElement("div");
+        div.className = "pulseStat " + key;
+        const suffix = key === "COINED" && coinSnapshotTruncated ? "+" : "";
+        div.innerHTML = `<span class="num">${pulseStats[key].toLocaleString()}${suffix}</span><span class="lbl">${label}</span>`;
+        pulseCountsEl.appendChild(div);
+    }
+    let topVid = null, topN = 0;
+    for (const [vid, n] of speakCounts) if (n > topN) { topN = n; topVid = vid; }
+    if (topVid !== null) {
+        const hex = VILLAGER_COLOR_HEX[villagerColorName(topVid)] || "#888";
+        pulseTopEl.innerHTML = `<span class="avatar" style="background:${hex}"></span>most heard from: <b>Villager ${topVid}</b> (${topN})`;
+    } else {
+        pulseTopEl.textContent = "";
+    }
+}
+
 // ---- experiment status strip (live/served mode only) ----
 
 function fmtDuration(s) {
@@ -577,6 +659,14 @@ if (!introSeen) introOverlayEl.classList.remove("hidden");
 if (location.protocol !== "file:") {
     pollStatus();
     setInterval(pollStatus, 30000);
+    // Served by the Space = public exhibit: the file picker, raw WS URL and connect
+    // button are local-dev plumbing (auto-connect already handles the live feed) --
+    // swap them for identity + the village pulse. file:// keeps the dev tooling.
+    titleEl.textContent = "🐠 10-Bit Village";
+    devControlsEl.classList.add("hidden");
+    taglineEl.classList.remove("hidden");
+    pulseEl.classList.remove("hidden");
+    renderPulse();
 } else {
     // file:// static replay has no server to ask -- the strip would just say "unavailable"
     statusBarEl.classList.add("hidden");

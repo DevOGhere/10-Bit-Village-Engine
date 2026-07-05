@@ -128,6 +128,32 @@ h2 { font-size: 13px; margin: 16px 0 6px 0; color: #9aa0ac; text-transform: uppe
 
 .hidden { display: none !important; }
 
+/* ---- served-mode identity: tagline + connection dot, dev controls hidden ---- */
+#tagline { font-size: 12px; color: #9aa0ac; margin: -4px 0 10px 0; }
+#connDot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: #f0ad4e; margin-right: 6px; vertical-align: baseline;
+    transition: background 0.3s ease;
+}
+#connDot.connected { background: #5fb878; }
+
+/* ---- village pulse (session stats) ---- */
+#pulse { margin-bottom: 4px; }
+#pulseCounts { display: flex; gap: 6px; flex-wrap: wrap; }
+.pulseStat {
+    flex: 1; min-width: 70px; text-align: center;
+    background: #1c1f27; border: 1px solid #2a2d36; border-radius: 8px;
+    padding: 6px 4px;
+}
+.pulseStat .num { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; display: block; }
+.pulseStat .lbl { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa0ac; }
+.pulseStat.MOMENT .num { color: #5fb878; }
+.pulseStat.GOSSIP .num { color: #5b9bd5; }
+.pulseStat.DREAM .num { color: #b07cd6; }
+.pulseStat.COINED .num { color: #ffd166; }
+#pulseTop { font-size: 11.5px; color: #9aa0ac; margin-top: 6px; }
+#pulseTop .avatar { width: 9px; height: 9px; display: inline-block; margin-right: 4px; }
+
 /* ---- experiment status strip (live mode only) ---- */
 #statusBar {
     display: flex;

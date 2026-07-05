@@ -7,12 +7,20 @@
 </head>
 <body>
 <div id="sidebar">
-    <h1>10-Bit Village — Replay</h1>
-    <input type="file" id="fileInput" accept=".json">
-    <h2>Live Space (Step 7)</h2>
-    <input type="text" id="liveUrl" placeholder="wss://your-space.hf.space/ws" size="30">
-    <button id="liveBtn">Connect</button>
-    <span id="liveStatus">disconnected</span>
+    <h1 id="title">10-Bit Village — Replay</h1>
+    <div id="tagline" class="hidden"><span id="connDot" title="disconnected"></span>a live society of 100 tiny minds</div>
+    <div id="devControls">
+        <input type="file" id="fileInput" accept=".json">
+        <h2>Live Space (Step 7)</h2>
+        <input type="text" id="liveUrl" placeholder="wss://your-space.hf.space/ws" size="30">
+        <button id="liveBtn">Connect</button>
+        <span id="liveStatus">disconnected</span>
+    </div>
+    <div id="pulse" class="hidden">
+        <h2>Village pulse — run so far</h2>
+        <div id="pulseCounts"></div>
+        <div id="pulseTop"></div>
+    </div>
     <div id="focusCard" class="hidden">
         <div id="focusHead">
             <span class="avatar" id="focusAvatar"></span>
