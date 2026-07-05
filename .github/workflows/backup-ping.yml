@@ -1,0 +1,32 @@
+name: Backup ping
+
+# Closes the gap flagged 2026-07-05: POST /backup on the live HF Space
+# (scripts/supervisor.py) only fires when something calls it -- nothing
+# was ever wired to call it automatically, so no backups landed in
+# DevOGhere/10-Bit-Village-Data after the last manual/QA trigger.
+# This is the external HTTP cron from packet 063's original design
+# (Oji's dual-purpose ping: backup + HF keep-alive) that never got built.
+# Runs every 30 min, comfortably inside supervisor.py's STALE_AFTER_S=3600
+# staleness window.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /backup to the live Space
+        run: |
+          code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${{ secrets.TBV_BACKUP_TOKEN }}" \
+            --max-time 60 \
+            https://devog-10-bit-village.hf.space/backup)
+          echo "HTTP $code"
+          cat /tmp/resp.txt
+          if [ "$code" != "200" ]; then
+            echo "::error::backup call failed with HTTP $code"
+            exit 1
+          fi
