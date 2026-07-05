@@ -38,3 +38,4 @@ vendor/llama.cpp/.git/
 
 # clangd LSP index cache
 .cache/
+scripts/__pycache__/
