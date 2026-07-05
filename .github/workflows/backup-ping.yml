@@ -30,3 +30,4 @@ jobs:
             echo "::error::backup call failed with HTTP $code"
             exit 1
           fi
+# touch to force reindex
