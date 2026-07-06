@@ -12,6 +12,12 @@ const villagerSprites = {};
 const eatingSprites = {};
 let grassTile = null;
 let grassPattern = null;
+let dirtTile = null;
+let dirtPattern = null;
+let waterTile = null;
+let waterPattern = null;
+let treeImg = null;
+let bushImg = null;
 // Draw itself runs continuously in frame() regardless of load state (checks .complete each
 // frame and falls back to a dot until then), so these onload handlers only need to update
 // state, not force a redraw.
@@ -31,6 +37,44 @@ for (const c of ["green", "blue", "red", "yellow"]) {
     const img = new Image();
     img.onload = () => { grassTile = img; };
     img.src = "sprites/terrain_grass.png";
+}
+{
+    const img = new Image();
+    img.onload = () => { dirtTile = img; };
+    img.src = "sprites/terrain_dirt.png";
+}
+{
+    const img = new Image();
+    img.onload = () => { waterTile = img; };
+    img.src = "sprites/terrain_water.png";
+}
+{
+    const img = new Image();
+    img.src = "sprites/obj_tree.png";
+    treeImg = img;
+}
+{
+    const img = new Image();
+    img.src = "sprites/obj_bush.png";
+    bushImg = img;
+}
+
+// Static terrain layout (client-only decoration -- the engine's grid has no terrain concept,
+// so none of this is ever fed back or read by the sim; a road/pond/treeline just gives the
+// tank a sense of place instead of a flat green void). Grid is always 32x24 (packet 052).
+const DIRT_ROWS = new Set([11, 12]); // a road cutting across the village
+const WATER_CELLS = new Set();
+for (const [wy, xs] of [[18, [27, 28, 29]], [19, [26, 27, 28, 29, 30]], [20, [26, 27, 28, 29, 30]],
+                         [21, [26, 27, 28, 29, 30]], [22, [27, 28, 29]]]) {
+    for (const wx of xs) WATER_CELLS.add(wx + "," + wy);
+}
+const TREE_CELLS = [[2, 2], [4, 1], [5, 3], [2, 5], [6, 4], [3, 6]];
+const BUSH_CELLS = [[8, 15], [10, 18], [13, 16], [22, 3], [24, 6], [20, 15]];
+
+function terrainAt(x, y) {
+    if (WATER_CELLS.has(x + "," + y)) return "water";
+    if (DIRT_ROWS.has(y)) return "dirt";
+    return "grass";
 }
 
 // Event-type cue icons (small floating overlays -- "small visual cues" section of the
@@ -310,14 +354,29 @@ function villagerColorName(vid) {
     return SPRITE_COLORS[vid % SPRITE_COLORS.length];
 }
 
-function drawGrid() {
-    if (grassTile && grassTile.complete && grassTile.naturalWidth > 0) {
-        if (!grassPattern) grassPattern = ctx.createPattern(grassTile, "repeat");
-        ctx.fillStyle = grassPattern;
-    } else {
-        ctx.fillStyle = "#1c1f27"; // fallback until the sprite loads
+function tilePattern(tile, cache) {
+    if (tile && tile.complete && tile.naturalWidth > 0) {
+        if (!cache.pattern) cache.pattern = ctx.createPattern(tile, "repeat");
+        return cache.pattern;
     }
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return null;
+}
+const grassCache = {}, dirtCache = {}, waterCache = {};
+
+function drawGrid() {
+    // Ground: per-cell terrain instead of one flat grass fill. Canvas patterns tile in
+    // canvas-space (not reset per fillRect), so adjacent same-type cells still line up
+    // seamlessly even though each cell is painted individually here.
+    for (let y = 0; y < data.meta.grid_h; y++) {
+        for (let x = 0; x < data.meta.grid_w; x++) {
+            const t = terrainAt(x, y);
+            const tile = t === "water" ? waterTile : t === "dirt" ? dirtTile : grassTile;
+            const cache = t === "water" ? waterCache : t === "dirt" ? dirtCache : grassCache;
+            const pattern = tilePattern(tile, cache);
+            ctx.fillStyle = pattern || "#1c1f27"; // fallback until the sprite loads
+            ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        }
+    }
     ctx.strokeStyle = "rgba(0,0,0,0.15)";
     ctx.lineWidth = 1;
     for (let x = 0; x <= data.meta.grid_w; x++) {
@@ -331,6 +390,21 @@ function drawGrid() {
         ctx.moveTo(0, y * TILE + 0.5);
         ctx.lineTo(canvas.width, y * TILE + 0.5);
         ctx.stroke();
+    }
+}
+
+// Trees/bushes drawn as oversized objects anchored bottom-center of their cell (same
+// convention as villager sprites) so they read as standing on the grid, not a background
+// texture. Drawn after the ground fill but before villagers, so villagers always render
+// in front of decoration -- avoids needing real depth-sorting for a purely cosmetic layer.
+function drawDecorations() {
+    for (const [cells, img, scale] of [[TREE_CELLS, treeImg, 2.2], [BUSH_CELLS, bushImg, 1.6]]) {
+        if (!img || !img.complete || img.naturalWidth === 0) continue;
+        const h = TILE * scale, w = h * (img.naturalWidth / img.naturalHeight);
+        for (const [cx, cy] of cells) {
+            const px = cx * TILE + TILE / 2, py = cy * TILE + TILE;
+            ctx.drawImage(img, px - w / 2, py - h, w, h);
+        }
     }
 }
 
@@ -358,12 +432,23 @@ function drawVillagers(now, dt) {
         // ease toward the real (sparse) position instead of snapping -- makes the rare
         // real moves readable as motion instead of a teleport, purely cosmetic
         const step = TWEEN_SPEED * dt;
-        vp.x += Math.max(-step, Math.min(step, v.x - vp.x));
-        vp.y += Math.max(-step, Math.min(step, v.y - vp.y));
+        const dx = v.x - vp.x, dy = v.y - vp.y;
+        // walking = still easing toward a real target this frame. The sheet's paired
+        // "walk" frames turned out to be near-duplicate idle poses for 4 of 5 colors on
+        // close inspection (only red actually differs) -- a real frame-swap would've
+        // animated one color and left the rest static, so this is a procedural squash/
+        // stretch bounce instead, consistent across every color with no new art needed.
+        const walking = Math.hypot(dx, dy) > 0.04;
+        vp.x += Math.max(-step, Math.min(step, dx));
+        vp.y += Math.max(-step, Math.min(step, dy));
 
-        const bob = Math.sin(now * BOB_SPEED + v.vid) * BOB_AMPLITUDE_PX;
+        const bobSpeed = walking ? BOB_SPEED * 3.5 : BOB_SPEED;
+        const bobAmp = walking ? BOB_AMPLITUDE_PX * 2.2 : BOB_AMPLITUDE_PX;
+        const bob = Math.sin(now * bobSpeed + v.vid) * bobAmp;
         const cx = vp.x * TILE + TILE / 2;
         const cy = vp.y * TILE + TILE / 2 + bob;
+        const walkPhase = walking ? Math.sin(now * bobSpeed + v.vid) : 0;
+        const scaleX = 1 + walkPhase * 0.09, scaleY = 1 - walkPhase * 0.09;
         const colorName = villagerColorName(v.vid);
         if (v.vid === focusVid) {
             // follow ring under the focused villager's feet, drawn before the sprite
@@ -375,7 +460,18 @@ function drawVillagers(now, dt) {
         }
         const sprite = (v.holding && eatingSprites[colorName]) ? eatingSprites[colorName] : villagerSprites[colorName];
         if (sprite && sprite.complete && sprite.naturalWidth > 0) {
-            ctx.drawImage(sprite, cx - spriteW / 2, cy - spriteH * 0.75, spriteW, spriteH);
+            if (walking) {
+                // pivot the squash/stretch from the feet (cy), not the sprite center, so it
+                // reads as a bounce off the ground rather than the whole body stretching
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.scale(scaleX, scaleY);
+                ctx.translate(-cx, -cy);
+                ctx.drawImage(sprite, cx - spriteW / 2, cy - spriteH * 0.75, spriteW, spriteH);
+                ctx.restore();
+            } else {
+                ctx.drawImage(sprite, cx - spriteW / 2, cy - spriteH * 0.75, spriteW, spriteH);
+            }
         } else {
             // fallback dot until sprites load
             ctx.fillStyle = "#8a8a8a";
@@ -701,6 +797,7 @@ function frame(now) {
     }
     if (data) {
         drawGrid();
+        drawDecorations();
         drawVillagers(now, dt);
         drawArcs(now);
     }
