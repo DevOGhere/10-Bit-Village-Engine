@@ -37,6 +37,7 @@ import socketserver
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -54,10 +55,70 @@ BACKUP_TIMEOUT_S = 30
 STALE_AFTER_S = 3600
 SPECTATOR_POLL_S = 2  # well above the real ~10s/tick cadence; still responsive, cheap to poll
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC6455 fixed handshake constant
+WS_BACKLOG_TICKS = 500  # A2: cap a connecting spectator's catch-up frame (Run 2 Plan §A2)
+TOTALS_POLL_S = 10       # ~matches real tick cadence; new rows per poll are usually 0-few
+
+MEMTYPE_NAMES = {0: "EXPERIENCE", 1: "HEARSAY", 2: "DREAM"}  # core/types.h MemType
 
 engine_proc = None
 last_backup_ts = None
 boot_ts = time.time()
+
+# ---- A2: run-so-far totals (Village Pulse tiles, packet 099) --------------------------
+# packet 099's tiles claimed "true run totals" by relying on the WS catch-up frame replaying
+# the FULL MemoryGraph history to every connecting client -- A2's WS_BACKLOG_TICKS cap breaks
+# that assumption, so totals move here instead. QA (packet 102, item 6) required incremental
+# counters, not a COUNT(*) scan on a 100MB WAL DB per /status call: one seed scan at boot,
+# then a single background thread advances the count via `id > cursor` (indexed range, cheap)
+# on its own poll loop -- independent of any WS connection, so multiple simultaneous
+# spectators don't multiply the query load and totals never double-count.
+run_totals_lock = threading.Lock()
+run_totals = {"EXPERIENCE": 0, "HEARSAY": 0, "DREAM": 0, "coined": 0}
+_totals_cursor = {"mem_id": 0, "coin_rowid": 0}
+
+
+def seed_run_totals():
+    con = sqlite3.connect(DB_PATH, timeout=1)
+    cur = con.cursor()
+    cur.execute("SELECT type, COUNT(*) FROM MemoryGraph GROUP BY type")
+    for t, c in cur.fetchall():
+        run_totals[MEMTYPE_NAMES.get(t, "EXPERIENCE")] = c
+    cur.execute("SELECT COALESCE(MAX(id), 0) FROM MemoryGraph")
+    _totals_cursor["mem_id"] = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM CoinedWords")
+    coined, max_rowid = cur.fetchone()
+    run_totals["coined"] = coined
+    _totals_cursor["coin_rowid"] = max_rowid
+    con.close()
+
+
+def totals_poller():
+    while True:
+        time.sleep(TOTALS_POLL_S)
+        try:
+            con = sqlite3.connect(DB_PATH, timeout=1)
+            cur = con.cursor()
+            cur.execute(
+                "SELECT type, COUNT(*), MAX(id) FROM MemoryGraph WHERE id > ? GROUP BY type",
+                (_totals_cursor["mem_id"],),
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                "SELECT COUNT(*), MAX(rowid) FROM CoinedWords WHERE rowid > ?",
+                (_totals_cursor["coin_rowid"],),
+            )
+            coined_new, coined_max_rowid = cur.fetchone()
+            con.close()
+            if rows or coined_new:
+                with run_totals_lock:
+                    for t, c, max_id in rows:
+                        run_totals[MEMTYPE_NAMES.get(t, "EXPERIENCE")] += c
+                        _totals_cursor["mem_id"] = max(_totals_cursor["mem_id"], max_id)
+                    if coined_new:
+                        run_totals["coined"] += coined_new
+                        _totals_cursor["coin_rowid"] = coined_max_rowid
+        except sqlite3.Error as e:
+            print(f"supervisor: totals_poller error: {e}", flush=True)
 
 
 def gh_request(method, url, data=None, headers=None, raw=False):
@@ -286,8 +347,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 tick = row[0] if row else None
             except sqlite3.Error:
                 pass
+            with run_totals_lock:
+                totals = {
+                    "moments": run_totals["EXPERIENCE"],
+                    "gossips": run_totals["HEARSAY"],
+                    "dreams": run_totals["DREAM"],
+                    "coined": run_totals["coined"],
+                }
             self._json(200, {"tick": tick, "uptime_s": time.time() - boot_ts,
-                              "last_backup_ts": last_backup_ts})
+                              "last_backup_ts": last_backup_ts, "run_totals": totals})
         elif self.path == "/ws":
             self.handle_ws_spectator()
         else:
@@ -327,7 +395,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", ws_accept_key(key))
         self.end_headers()
         last_tick = -1
-        last_event_tick = -1
+        # A2 (Run 2 Plan §A2): Run 1 replayed the FULL MemoryGraph history to every
+        # connecting spectator -- harmless at launch, but an unbounded catch-up frame on a
+        # long-lived run (Run 1 hit ~14MB at tick ~32k) only grows. Cap it the same way the
+        # coinage cursor below already does: start ~500 ticks back, then stream incrementally.
+        # (Village Pulse "run totals" no longer come from this frame -- see run_totals/A2.)
+        last_event_tick = -1  # -1 = no floor; a fresh/short run has nothing to cap yet
+        con = sqlite3.connect(DB_PATH, timeout=1)
+        row = con.execute("SELECT MAX(tick) FROM MemoryGraph").fetchone()
+        con.close()
+        if row and row[0] is not None:
+            last_event_tick = max(-1, row[0] - WS_BACKLOG_TICKS)
         # Coinage snapshot cap: a long run accumulates thousands of coined terms, and a
         # cursor starting at 0 would dump the entire table into the first frame. Start the
         # cursor 200 rows back instead -- new spectators see the newest 200 terms, then
@@ -380,6 +458,12 @@ def main():
     restore_on_boot()
     os.makedirs("staging", exist_ok=True)
     engine_proc = subprocess.Popen(["./tbv_engine", "--serve"])
+
+    try:
+        seed_run_totals()
+    except sqlite3.Error as e:
+        print(f"supervisor: seed_run_totals failed (fresh boot, DB not created yet?): {e}", flush=True)
+    threading.Thread(target=totals_poller, daemon=True).start()
 
     def relay_term(signum, frame):
         if engine_proc and engine_proc.poll() is None:

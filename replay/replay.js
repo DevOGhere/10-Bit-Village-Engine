@@ -157,13 +157,14 @@ let latestPositions = [];
 const ARC_DURATION_MS = 5000;
 const activeArcs = []; // { from, to, expiresAt }
 
-// Village pulse: run-so-far counts. Events are accurate run totals (the WS catch-up frame
-// replays the full MemoryGraph history); the coinage snapshot is capped at the newest 200,
-// so if the first batch arrives full we can only honestly say "200+".
+// Village pulse: run-so-far counts, sourced from /status's run_totals (A2, Run 2 Plan §A2).
+// Used to compute these client-side from the WS catch-up frame, which relied on that frame
+// replaying the FULL MemoryGraph history on connect -- A2 caps that backlog to the newest
+// WS_BACKLOG_TICKS window (server-side), so these tiles would silently undercount on any
+// run past that window. The server keeps the real incremental total instead (supervisor.py
+// run_totals) and /status is polled every 30s to refresh them.
 const pulseStats = { MOMENT: 0, GOSSIP: 0, DREAM: 0, COINED: 0 };
-const speakCounts = new Map(); // vid -> events attributed to them
-let coinSnapshotTruncated = false;
-let firstCoinBatch = true;
+const speakCounts = new Map(); // vid -> events attributed to them (from what this tab has seen -- "most heard from" stays a since-connection approximation, unaffected by the totals fix)
 
 // One pending reconnect timer at a time; manual connects cancel it. A socket that was
 // genuinely open retries fast (blip recovery); one that never opened (Space rebuilding,
@@ -201,10 +202,10 @@ function connectLive(url) {
     visualPos.clear();
     activeCues.clear();
     renderCoinList();
-    pulseStats.MOMENT = 0; pulseStats.GOSSIP = 0; pulseStats.DREAM = 0; pulseStats.COINED = 0;
+    // pulseStats is NOT reset here anymore -- it's server-truth run totals (A2), not derived
+    // from this connection's catch-up frame, so a reconnect shouldn't zero it back to 0.
+    // pollStatus() (already running on its own interval) refreshes it independently.
     speakCounts.clear();
-    coinSnapshotTruncated = false;
-    firstCoinBatch = true;
     renderPulse();
     liveStatusEl.textContent = "connecting...";
     liveBtn.textContent = "Disconnect";
@@ -255,13 +256,9 @@ function connectLive(url) {
                 coinTerms.unshift({ term, coiner, birth_tick, spread: null });
             }
             if (coinTerms.length > 300) coinTerms.length = 300; // keep panel + memory bounded
-            pulseStats.COINED += msg.coinages.length;
-            // the server's connect-time snapshot is capped at the newest 200 -- a full first
-            // batch means older terms exist that we never saw, so the count is a floor
-            if (firstCoinBatch && msg.coinages.length === 200) coinSnapshotTruncated = true;
-            firstCoinBatch = false;
+            // pulseStats.COINED comes from /status now (A2) -- the panel list above is still
+            // WS-fed (newest-200 snapshot + incremental), just no longer double-books the tile.
             renderCoinList();
-            renderPulse();
         }
         if (positionsByTick.size > LIVE_HISTORY_TICKS) {
             const oldest = Math.min(...positionsByTick.keys());
@@ -573,7 +570,8 @@ function renderEvents() {
             if (typeName === "HEARSAY" && actor != null && actor !== vid) {
                 activeArcs.push({ from: actor, to: vid, expiresAt: performance.now() + ARC_DURATION_MS });
             }
-            pulseStats[TYPE_LABEL[typeName] || "MOMENT"]++;
+            // pulseStats no longer incremented here -- see A2 note at its declaration; the
+            // MOMENT/GOSSIP/DREAM/COINED tiles come from /status's run_totals instead.
             speakCounts.set(vid, (speakCounts.get(vid) || 0) + 1);
         }
         if (newOnes.length > 0) renderPulse();
@@ -704,8 +702,9 @@ function renderPulse() {
     for (const [key, label] of PULSE_TILES) {
         const div = document.createElement("div");
         div.className = "pulseStat " + key;
-        const suffix = key === "COINED" && coinSnapshotTruncated ? "+" : "";
-        div.innerHTML = `<span class="num">${pulseStats[key].toLocaleString()}${suffix}</span><span class="lbl">${label}</span>`;
+        // no "+"-floor suffix anymore -- run_totals (A2) is an exact server-side count,
+        // not a WS-snapshot-derived lower bound like the old client-side tally was.
+        div.innerHTML = `<span class="num">${pulseStats[key].toLocaleString()}</span><span class="lbl">${label}</span>`;
         pulseCountsEl.appendChild(div);
     }
     let topVid = null, topN = 0;
@@ -735,6 +734,15 @@ async function pollStatus() {
             ? `last backup ${fmtDuration(Date.now() / 1000 - s.last_backup_ts)} ago`
             : "no backup yet");
         statusWorldEl.textContent = parts.join(" · ");
+        // A2: Village Pulse tiles are server-truth run totals now (see pulseStats decl) --
+        // /status is the only place they're set, on this existing 30s poll.
+        if (s.run_totals) {
+            pulseStats.MOMENT = s.run_totals.moments;
+            pulseStats.GOSSIP = s.run_totals.gossips;
+            pulseStats.DREAM = s.run_totals.dreams;
+            pulseStats.COINED = s.run_totals.coined;
+            renderPulse();
+        }
     } catch {
         statusWorldEl.textContent = "status unavailable";
     }
