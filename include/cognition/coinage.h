@@ -54,10 +54,21 @@ inline std::vector<std::string> tokenize(const std::string& text) {
 //      this was never a coinage, just a form the dictionary doesn't carry as-is.
 constexpr size_t COINAGE_MIN_LEN = 5;
 
+// Found empirically (2026-07-09, real 2000-tick local sustained run, Run 2 Plan Phase B
+// final gate spot-check): 73/282 coinages from that run were plain -ies/-est word forms
+// ("stories", "families", "smallest", "darkest"...) that the original suffix list below
+// missed entirely -- 26% false-positive rate discovered before this ever shipped. "est" was
+// a one-line fix (fits the exact same strip-and-check pattern as the other suffixes, e.g.
+// "darkest"->"dark", "closest"->"clos"->"close"). "-ies" needed its own branch: it's not a
+// suffix STRIP, the "y" itself was elided ("stories" -> "story", not "stor" or "storie").
 inline bool is_inflection_or_fragment(const std::string& tok) {
     if (tok.size() < COINAGE_MIN_LEN) return true;
-    static const std::string suffixes[] = {"s", "es", "ed", "ing", "ly", "er", "ers"};
     const auto& dict = dictionary();
+    if (tok.size() > 4 && tok.compare(tok.size() - 3, 3, "ies") == 0) {
+        std::string stem = tok.substr(0, tok.size() - 3) + "y";
+        if (dict.count(stem)) return true;
+    }
+    static const std::string suffixes[] = {"s", "es", "ed", "ing", "ly", "er", "ers", "est"};
     for (const auto& suf : suffixes) {
         if (tok.size() <= suf.size() || tok.compare(tok.size() - suf.size(), suf.size(), suf) != 0)
             continue;
