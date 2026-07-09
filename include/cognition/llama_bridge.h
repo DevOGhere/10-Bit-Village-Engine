@@ -39,10 +39,14 @@ public:
 
     // Phase 2 / MSG_062 §2: retell a heard (pre-degraded) memory through this villager's
     // mind — free reconstruction (Segment 1) + structured field extraction (Segment 2).
-    RetellResult retell(VillagerID id, const std::string& heard, uint64_t seed);
+    // `persona` (Run 2 Plan §B2, e.g. genome::trait_prose) prepends the same genome-flavour
+    // prose the ACTION path always had -- Run 1 had zero persona reaching retell/dream, so
+    // every villager retold rumours in one anonymous voice.
+    RetellResult retell(VillagerID id, const std::string& heard, const std::string& persona, uint64_t seed);
 
-    // Phase 2: recombine memory fragments into a surreal DREAM (free).
-    std::string dream(VillagerID id, const std::vector<std::string>& fragments, uint64_t seed);
+    // Phase 2: recombine memory fragments into a surreal DREAM (free). `persona` — see retell().
+    std::string dream(VillagerID id, const std::vector<std::string>& fragments,
+                       const std::string& persona, uint64_t seed);
 
 private:
     llama_model* model = nullptr;

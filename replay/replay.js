@@ -101,6 +101,11 @@ let data = null;
 let positionsByTick = new Map();
 let eventsSorted = [];
 let coinTerms = [];
+// B5 (Run 2 Plan §B5): term -> Set(adopter villager ids), NEVER includes the coiner --
+// CoinageSpread only logs a row when a DIFFERENT villager reuses a term (world.cpp:
+// term_adopters pre-seeds the coiner at coining time, so log_coinage_adoption can't fire
+// for them). renderCoinList() only shows terms with at least one real adopter.
+const coinAdopters = new Map();
 let currentTick = 0;
 let playing = false;
 let ticksPerSecond = 5;
@@ -197,6 +202,7 @@ function connectLive(url) {
     positionsByTick = new Map();
     eventsSorted = [];
     coinTerms = [];
+    coinAdopters.clear();
     renderedLogCount = 0;
     logEl.innerHTML = "";
     visualPos.clear();
@@ -258,6 +264,17 @@ function connectLive(url) {
             if (coinTerms.length > 300) coinTerms.length = 300; // keep panel + memory bounded
             // pulseStats.COINED comes from /status now (A2) -- the panel list above is still
             // WS-fed (newest-200 snapshot + incremental), just no longer double-books the tile.
+            renderCoinList();
+        }
+        if (msg.adoptions && msg.adoptions.length > 0) {
+            // B5: a term can arrive here before its own coinage row does (server's adoption
+            // cursor starts 200 rows back independent of the coinage cursor's own snapshot) --
+            // track the Set regardless; renderCoinList's filter only shows terms coinTerms
+            // actually knows about, so an orphaned adopter entry just waits harmlessly.
+            for (const [term, adopterId] of msg.adoptions) {
+                if (!coinAdopters.has(term)) coinAdopters.set(term, new Set());
+                coinAdopters.get(term).add(adopterId);
+            }
             renderCoinList();
         }
         if (positionsByTick.size > LIVE_HISTORY_TICKS) {
@@ -598,10 +615,18 @@ function applyChatFilter() {
 function renderCoinList() {
     coinListEl.innerHTML = "";
     for (const c of coinTerms) {
+        // B5 adoption filter: a term with nobody but its own coiner using it is usually
+        // still noise the engine-side inflection filter didn't catch (or just never caught
+        // on) -- only show terms with >=1 real adopter. Live mode: coinAdopters (server-
+        // sourced, never includes the coiner). Static replay.json mode: c.spread counts
+        // ALL matching villagers INCLUDING the coiner's own coining text, so >=2 is the
+        // equivalent "someone besides the coiner used it" threshold there.
+        const adopterCount = liveMode ? (coinAdopters.get(c.term) || new Set()).size
+                                       : Math.max(0, (c.spread || 0) - 1);
+        if (adopterCount < 1) continue;
         const div = document.createElement("div");
-        div.className = "coin" + (c.spread >= 2 ? " spread" : "");
-        const spreadNote = c.spread === null ? "" : `, spread to ${c.spread} villager(s)`;
-        div.innerHTML = `<span class="term">${c.term}</span> — coined by v${c.coiner} @t${c.birth_tick}${spreadNote}`;
+        div.className = "coin spread";
+        div.innerHTML = `<span class="term">${c.term}</span> — coined by v${c.coiner} @t${c.birth_tick}, adopted by ${adopterCount} villager(s)`;
         coinListEl.appendChild(div);
     }
 }

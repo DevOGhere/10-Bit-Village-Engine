@@ -159,6 +159,7 @@ void Database::init_schema() {
         "   source_depth INTEGER,"
         "   origin_mem_id INTEGER,"
         "   text TEXT,"
+        "   retell_count INTEGER DEFAULT 0," // §B3 (Run 2 Plan) -- must round-trip on restore
         "   PRIMARY KEY(run_id, villager_id, seq)"
         ");"
         "CREATE TABLE IF NOT EXISTS CheckpointAsyncQueue ("
@@ -470,7 +471,7 @@ void Database::save_checkpoint(const WorldState& w) {
     {
         const char* sql =
             "INSERT INTO CheckpointMemory (run_id, villager_id, seq, mem_id, tick, actor_id, importance, "
-            "type, source_depth, origin_mem_id, text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            "type, source_depth, origin_mem_id, text, retell_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
         sqlite3_stmt* stmt;
         sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
         for (uint32_t v = 0; v < MAX_VILLAGERS; ++v) {
@@ -488,6 +489,7 @@ void Database::save_checkpoint(const WorldState& w) {
                 sqlite3_bind_int(stmt, 9, (int)m.source_depth);
                 sqlite3_bind_int(stmt, 10, (int)m.origin_mem_id);
                 sqlite3_bind_text(stmt, 11, m.text.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(stmt, 12, (int)m.retell_count);
                 sqlite3_step(stmt);
                 sqlite3_reset(stmt);
             }
@@ -594,7 +596,7 @@ bool Database::load_checkpoint(WorldState& w) {
     {
         const char* sql =
             "SELECT villager_id, mem_id, tick, actor_id, importance, type, source_depth, "
-            "origin_mem_id, text FROM CheckpointMemory WHERE run_id = ? ORDER BY villager_id, seq ASC;";
+            "origin_mem_id, text, retell_count FROM CheckpointMemory WHERE run_id = ? ORDER BY villager_id, seq ASC;";
         sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
         sqlite3_bind_text(stmt, 1, w.run_id.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -609,6 +611,7 @@ bool Database::load_checkpoint(WorldState& w) {
             m.origin_mem_id = (uint32_t)sqlite3_column_int(stmt, 7);
             const char* txt = (const char*)sqlite3_column_text(stmt, 8);
             m.text = txt ? txt : "";
+            m.retell_count = (uint16_t)sqlite3_column_int(stmt, 9);
             if (vid < MAX_VILLAGERS) per_villager[vid].push_back(std::move(m));
         }
         sqlite3_finalize(stmt);

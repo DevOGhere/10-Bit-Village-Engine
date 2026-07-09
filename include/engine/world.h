@@ -21,6 +21,12 @@ class Database;
 
 constexpr size_t MAX_VILLAGERS = 100;
 
+// Run 2 Plan §B1 — grounded-experience floor. Every GROUNDED_FLOOR_MODth cognition turn
+// (per villager, by dispatch ordinal) is forced down the ACTION path regardless of
+// dream/hearsay eligibility, so firsthand experience isn't starved by the dense-grid
+// HEARSAY/DREAM priority (Run 1: 0.6% ACTION). Survival reflex still overrides everything.
+constexpr uint64_t GROUNDED_FLOOR_MOD = 4; // 1-in-4 = 25%
+
 // Spatial grid (Gemini [052]: 32x24 = 768 cells, ~13% density for 100 villagers).
 constexpr int GRID_W = 32;
 constexpr int GRID_H = 24;

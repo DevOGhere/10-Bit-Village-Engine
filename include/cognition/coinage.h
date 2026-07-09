@@ -45,11 +45,38 @@ inline std::vector<std::string> tokenize(const std::string& text) {
     return out;
 }
 
-// Tokens from `text` that are not in /usr/share/dict/words.
+// Run 2 Plan §B5 — the not-in-dictionary filter alone flags ~90% inflection/fragment noise
+// (packet 098, reproduced exactly by analyze_run.py's baseline: 82.7% on Run 1's CoinedWords).
+// Two extra gates before a token counts as a real coinage:
+//   1. length >= COINAGE_MIN_LEN -- kills short fragments ("gle", "unsh", "doth").
+//   2. inflection gate -- strip a common suffix; if the stem (or stem+"e", or an undoubled
+//      final-consonant stem, e.g. "smudging"->"smudg"->"smudge"/"smudg") is a real dict word,
+//      this was never a coinage, just a form the dictionary doesn't carry as-is.
+constexpr size_t COINAGE_MIN_LEN = 5;
+
+inline bool is_inflection_or_fragment(const std::string& tok) {
+    if (tok.size() < COINAGE_MIN_LEN) return true;
+    static const std::string suffixes[] = {"s", "es", "ed", "ing", "ly", "er", "ers"};
+    const auto& dict = dictionary();
+    for (const auto& suf : suffixes) {
+        if (tok.size() <= suf.size() || tok.compare(tok.size() - suf.size(), suf.size(), suf) != 0)
+            continue;
+        std::string stem = tok.substr(0, tok.size() - suf.size());
+        if (dict.count(stem)) return true;
+        if (dict.count(stem + "e")) return true;
+        if (stem.size() >= 2 && stem[stem.size() - 1] == stem[stem.size() - 2]
+            && dict.count(stem.substr(0, stem.size() - 1))) return true;
+    }
+    return false;
+}
+
+// Tokens from `text` that are not in /usr/share/dict/words AND survive the B5 filter above --
+// this IS the set that ends up in WorldState.coined_words, so B6-2's distortion-vocabulary
+// feedback loop (degradation.h) draws from clean terms, not dictionary-inflection noise.
 inline std::vector<std::string> coined_terms(const std::string& text) {
     std::vector<std::string> out;
     for (auto& tok : tokenize(text)) {
-        if (!dictionary().count(tok)) out.push_back(tok);
+        if (!dictionary().count(tok) && !is_inflection_or_fragment(tok)) out.push_back(tok);
     }
     return out;
 }

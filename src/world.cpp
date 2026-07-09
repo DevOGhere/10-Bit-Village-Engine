@@ -74,10 +74,20 @@ void WorldState::dispatch_cognition(VillagerID v) {
     uint64_t cseed = splitmix64_avalanche(((uint64_t)r << 16) ^ ((uint64_t)v << 32) ^ current_tick);
 
     bool survival = (needs[v].hunger <= HUNGER_CRIT && holding_food[v]);
+
+    // §B1 GROUNDED_FLOOR: every GROUNDED_FLOOR_MODth cognition turn is forced down the
+    // ACTION path (25% at MOD=4), so firsthand experience isn't starved by dream/hearsay
+    // priority on the dense grid. Dispatch ordinal k derives from current_tick (this
+    // villager dispatches at ticks v, v+100, v+200, ... -- k = 0, 1, 2, ...), not from any
+    // RNG draw, so it doesn't touch stream consumption order. Survival still overrides it.
+    // (42% was considered, for Hitchhiker's sake. The towel stays packed. — Oji, 07-09)
+    const uint64_t k = (current_tick - v) / MAX_VILLAGERS;
+    const bool force_action = ((k % GROUNDED_FLOOR_MOD) == GROUNDED_FLOOR_MOD - 1);
+
     // Dream when cooldown has passed AND the villager is lonely (no neighbour) OR a 1-in-6
     // cognition roll hits — so dreams surface even on the dense grid, without starving hearsay.
-    bool can_dream   = (current_tick > last_dream_tick[v] + 100) && (nbrs.empty() || (r % 6 == 0));
-    bool can_hearsay = !nbrs.empty();
+    bool can_dream   = !force_action && (current_tick > last_dream_tick[v] + 100) && (nbrs.empty() || (r % 6 == 0));
+    bool can_hearsay = !force_action && !nbrs.empty();
 
     DeferredTask t;
     t.villager_id = v;
@@ -98,7 +108,7 @@ void WorldState::dispatch_cognition(VillagerID v) {
             t.target        = v;
             t.origin_mem_id = t.mem_id;                    // self-origin: a dream is a new belief
             t.fold_tick     = current_tick + 20;
-            t.text          = bridge->dream(v, frags, cseed);
+            t.text          = bridge->dream(v, frags, trait_prose(genomes[v]), cseed); // §B2
             t.importance    = importance(MemType::DREAM, 0, lowest_need(v), t.mem_id, v, current_tick);
             last_dream_tick[v] = current_tick;
             if (db) {
@@ -119,9 +129,12 @@ void WorldState::dispatch_cognition(VillagerID v) {
         VillagerID src = nbrs[pick];
         const MemoryEntry* m = stores[src].most_salient(current_tick);
         if (m) {
+            // §B3: bump fatigue on the memory just selected -- in-place mutation via mem_id
+            // lookup, doesn't touch/invalidate `m` (see cognitive_store.h note_retold()).
+            stores[src].note_retold(m->mem_id);
             // MSG_062 §2: degrade the heard memory -> two-segment retell -> forced novelty.
             // hearsay_hop is the shared engine/gate path (no logic the gate can't see).
-            RetellResult rr = hearsay_hop(*bridge, v, *m, genomes[v], current_tick, cseed);
+            RetellResult rr = hearsay_hop(*bridge, v, *m, genomes[v], current_tick, cseed, &coined_words);
             t.kind          = TaskKind::HEARSAY;
             t.mtype         = MemType::HEARSAY;
             t.target        = src;                          // actor_id = source of the gossip
@@ -134,7 +147,9 @@ void WorldState::dispatch_cognition(VillagerID v) {
             if (db) {
                 // Re-derive the degraded text the listener actually worked from (pure function
                 // of heard/tick, no RNG — safe to call again here purely for the delta metric).
-                std::string degraded = degrade(*m, current_tick);
+                // Same coined_words set as hearsay_hop's internal degrade() call (§B6-1) --
+                // otherwise this logged delta wouldn't reflect what was actually masked.
+                std::string degraded = degrade(*m, current_tick, &coined_words);
                 int delta = content_word_delta(degraded, rr.out_text);
                 db->log_hearsay_chain(run_id, t.origin_mem_id, t.origin_mem_id, t.source_depth,
                                       src, v, genomes[src].pack(), genomes[v].pack(),
@@ -233,10 +248,18 @@ void WorldState::apply_task(const DeferredTask& t) {
         if (evicted) db->mark_belief_death(run_id, evicted->mem_id, current_tick, evicted->origin_mem_id);
     }
 
-    // ---- Coinage harvest: flag free-generation tokens absent from the system dictionary.
-    // First coiner wins; the term then rides hearsay/dream/action text naturally. Adoption
+    // ---- Coinage harvest: flag free-generation tokens absent from the system dictionary
+    // AND surviving the §B5 inflection/fragment filter (coinage.h::coined_terms). First
+    // coiner wins; the term then rides hearsay/dream/action text naturally. Adoption
     // (a DIFFERENT villager's text reusing an already-coined term, credited once each) feeds
-    // CoinageSpread — observational only, doesn't influence dispatch/RNG. ----
+    // CoinageSpread — observational for DISPATCH/RNG (still true: nothing here consumes a
+    // stream draw or changes what runs next tick). §B6-2 (QA-approved, packet 102 item 4)
+    // deliberately changes the other half of that old claim: `coined_words` now ALSO feeds
+    // back into generated TEXT via distortion_word() (degradation.h) -- a hash-picked,
+    // RNG-free read of a set that's itself a pure function of run history, so determinism
+    // is unaffected, but "coinage never influences anything downstream" is no longer true.
+    // That feedback loop -- a culture mutating itself via its own invented words -- IS the
+    // thesis (Research Dossier §B), not a smuggled side-channel. ----
     for (const auto& term : coined_terms(t.text)) {
         if (coined_words.insert(term).second) {
             CoinageOrigin origin;
@@ -283,12 +306,7 @@ PerceptionContext WorldState::build_perception(VillagerID v,
 
     const Genome& g = genomes[v];
     std::ostringstream s;
-    s << "You are a thronglet living in the village. ";
-    if (g.suspicion >= 2)   s << "You are wary, quick to suspect hidden motives. ";
-    if (g.curiosity >= 2)   s << "You are endlessly curious about the world. ";
-    s << (g.sociability >= 2 ? "You crave the company of others. " : "You prefer to keep to yourself. ");
-    if (g.generosity >= 2)  s << "You are openhanded and giving. ";
-    if (g.aggression >= 2)  s << "You have a fierce, short temper. ";
+    s << trait_prose(g);  // §B2: single source of truth, shared with retell()/dream() now
     if (needs[v].hunger < 30000)      s << "You are very hungry. ";
     else if (needs[v].hunger < 60000) s << "You feel peckish. ";
     if (needs[v].social < 30000)      s << "You feel painfully lonely. ";

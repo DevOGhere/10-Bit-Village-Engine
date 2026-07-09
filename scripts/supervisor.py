@@ -247,11 +247,11 @@ def do_backup():
     return True, tag
 
 
-def read_live_state(last_tick, last_event_tick, last_coin_rowid):
+def read_live_state(last_tick, last_event_tick, last_coin_rowid, last_spread_rowid):
     """Poll village.db for the newest ticked VillagerState rows + any MemoryGraph events
-    since last_event_tick + any CoinedWords past last_coin_rowid. Read-only; the engine
-    subprocess is the sole writer (WAL handles concurrent readers). Returns None when
-    nothing new exists on any axis.
+    since last_event_tick + any CoinedWords past last_coin_rowid + any CoinageSpread past
+    last_spread_rowid. Read-only; the engine subprocess is the sole writer (WAL handles
+    concurrent readers). Returns None when nothing new exists on any axis.
 
     Positions and events are NOT the same tick counter in practice: cognition dispatch
     fold-back applies actions/hearsay N+5 ticks later and dreams N+20 (Phase 3 design) --
@@ -286,9 +286,23 @@ def read_live_state(last_tick, last_event_tick, last_coin_rowid):
         "WHERE rowid > ? ORDER BY rowid", (last_coin_rowid,)
     )
     coin_rows = cur.fetchall()
+
+    # B5 UI adoption filter (Run 2 Plan §B5): a term with zero adopters is rendered
+    # filtered-out client-side, but at the moment a term is FIRST coined it always has zero
+    # adopters (adoption happens strictly after coining) -- pushing coinage rows alone would
+    # make the panel start empty and (almost) never fill in, since a term already pushed
+    # never gets re-sent once past this cursor. CoinageSpread is also an append-only,
+    # never-updated rowid table (one row per first-time adopter, log_coinage_adoption), so the
+    # same incremental-cursor pattern applies: push new adoption events separately, client
+    # merges them onto terms it already knows about.
+    cur.execute(
+        "SELECT rowid, term, adopter_id FROM CoinageSpread "
+        "WHERE rowid > ? ORDER BY rowid", (last_spread_rowid,)
+    )
+    spread_rows = cur.fetchall()
     con.close()
 
-    if positions is None and not events and not coin_rows:
+    if positions is None and not events and not coin_rows and not spread_rows:
         return None
     new_event_tick = events[-1][0] if events else last_event_tick
     return {
@@ -298,8 +312,10 @@ def read_live_state(last_tick, last_event_tick, last_coin_rowid):
         # several distinct past ticks at once (fold-back catch-up), never assume msg.tick
         "events": events,
         "coinages": [[r[1], r[2], r[3]] for r in coin_rows],
+        "adoptions": [[r[1], r[2]] for r in spread_rows],  # [term, adopter_id]
         "_last_event_tick": new_event_tick,
         "_last_coin_rowid": coin_rows[-1][0] if coin_rows else last_coin_rowid,
+        "_last_spread_rowid": spread_rows[-1][0] if spread_rows else last_spread_rowid,
     }
 
 
@@ -416,13 +432,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         con.close()
         if row and row[0] is not None:
             last_coin_rowid = max(0, row[0] - 200)
+        # B5: adoption-cursor snapshot mirrors the coinage cursor's own newest-N cap -- a
+        # spectator connecting on a long run doesn't need every historical adoption, just
+        # enough to light up adopters>=1 on the newest-200 coinage snapshot above it (200 is
+        # a generous cap: each of those terms needs at most 1 counted event to clear the filter).
+        last_spread_rowid = 0
+        con = sqlite3.connect(DB_PATH, timeout=1)
+        row = con.execute("SELECT MAX(rowid) FROM CoinageSpread").fetchone()
+        con.close()
+        if row and row[0] is not None:
+            last_spread_rowid = max(0, row[0] - 200)
         try:
             while True:
-                state = read_live_state(last_tick, last_event_tick, last_coin_rowid)
+                state = read_live_state(last_tick, last_event_tick, last_coin_rowid, last_spread_rowid)
                 if state is not None:
                     last_tick = state["tick"]
                     last_event_tick = state.pop("_last_event_tick")
                     last_coin_rowid = state.pop("_last_coin_rowid")
+                    last_spread_rowid = state.pop("_last_spread_rowid")
                     send_ws_text_frame(self.connection, json.dumps(state))
                 else:
                     # heartbeat so HF's reverse proxy doesn't idle-time the connection out

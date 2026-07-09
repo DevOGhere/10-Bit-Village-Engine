@@ -390,7 +390,21 @@ int main(int argc, char** argv) {
             tbv::Database db_r(":memory:"); db_r.init_schema();
             tbv::WorldState r; r.init(12345); r.attach(&bridge, &db_r, "g");
             while (r.current_tick < 200) r.tick();
-            uint64_t canonical = 0x567898a5104b509dULL;
+            // NOTE this run attaches a bridge -- it's a full cognition run, not headless
+            // Phase 0 (that stays byte-identical by construction: tick() only calls
+            // dispatch_cognition when bridge != nullptr, so a truly headless run never
+            // touches any B-item code at all). This hardcoded value is a Step-4-era tripwire
+            // for the checkpoint/restore plumbing specifically, NOT a promise that cognition
+            // output never changes -- Run 2 Plan Phase B (2026-07-09) intentionally changes
+            // generated text/dispatch (B1 grounded floor, B2 persona, B3 fatigue, B4 trim,
+            // B6 coinage feedback), so the old value legitimately retires here.
+            // RETIRED: 0x567898a5104b509dULL (Step 3, hearsay-degradation fix, 2026-06-22).
+            // NEW canonical (seed 12345, N=200), independently reproduced twice this session:
+            // once via --checkpoint_gate's own run of this exact code path, once via a
+            // separate --phase3 200 process invocation (same-seed rerun byte-identical,
+            // diff-seed(+777) diverges to d05647a264533b0e, emergence intact: hearsay
+            // depth=3, dreams=31).
+            uint64_t canonical = 0xcb224352745e7d19ULL;
             bool canon_ok = (world_hash(r) == canonical);
             std::cout << "canonical --phase3 200 hash @seed 12345: " << std::hex << world_hash(r)
                       << std::dec << (canon_ok ? "  ✅ unchanged\n" : "  ❌ DRIFTED\n");
@@ -469,7 +483,7 @@ int main(int argc, char** argv) {
                 std::string final_text = seed_mem.text;
                 for (int v = 1; v < N; ++v) {
                     const tbv::MemoryEntry* src = villagers[v - 1].most_salient();
-                    std::string heard = bridge.retell((tbv::VillagerID)v, src->text, s + v).out_text;
+                    std::string heard = bridge.retell((tbv::VillagerID)v, src->text, "", s + v).out_text;
                     tbv::MemoryEntry h;
                     h.mem_id = (uint32_t)v; h.type = tbv::MemType::HEARSAY;
                     h.source_depth = (uint8_t)(src->source_depth + 1);
@@ -493,8 +507,8 @@ int main(int argc, char** argv) {
 
             // DREAM: recombine fragments (seed + last hop) into a surreal dream; check determinism.
             std::vector<std::string> frags = { seed_text, final1 };
-            std::string d1 = bridge.dream(3, frags, seed + 99);
-            std::string d2 = bridge.dream(3, frags, seed + 99);
+            std::string d1 = bridge.dream(3, frags, "", seed + 99);
+            std::string d2 = bridge.dream(3, frags, "", seed + 99);
             bool dream_ok = (d1.size() > 60) && (d1 == d2);
             std::cout << "DREAM len=" << d1.size() << ": " << d1.substr(0, 110) << "...\n";
             std::cout << (dream_ok ? "✅ dream: coherent + deterministic\n" : "❌ dream: degenerate or non-deterministic\n");

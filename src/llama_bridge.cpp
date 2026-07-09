@@ -5,6 +5,27 @@
 
 namespace tbv {
 
+// Run 2 Plan §B4 — truncated fragments (mid-sentence cuts from the token cap) were
+// entering memory stores and getting re-mutated forever; visible to every real visitor.
+// Finds the LAST sentence terminator and truncates just after it (absorbing one
+// immediately-following closing quote/paren, since a terminator often hides behind
+// one -- e.g. `he said "stop."` ). If no terminator exists at all, the text is left
+// untouched -- never return an empty string just because generation never finished
+// a sentence within budget.
+static void trim_to_sentence(std::string& s) {
+    static const std::string closers = "\"')"; // ASCII closers only -- avoid UTF-8 byte-match foot-guns
+    for (size_t i = s.size(); i-- > 0; ) {
+        char c = s[i];
+        if (c == '.' || c == '!' || c == '?') {
+            size_t end = i + 1;
+            if (end < s.size() && closers.find(s[end]) != std::string::npos) end++;
+            if (end < s.size()) s.erase(end);
+            return;
+        }
+    }
+    // no terminator found -- keep raw, don't manufacture an empty string
+}
+
 LlamaBridge::LlamaBridge(const std::string& model_path) {
     llama_backend_init();
     llama_model_params mparams = llama_model_default_params();
@@ -93,6 +114,7 @@ Cognition LlamaBridge::infer(VillagerID id, const PerceptionContext& pc, uint64_
 
     // Segment 1: free thought.
     std::string thought = gen(ctx, vocab, b, pos, chain, n_thought_cap);
+    trim_to_sentence(thought); // §B4 -- thought only, never intent (resolver needs the raw text)
     // Free intent micro-gen (fresh user turn, same context).
     decode_str(ctx, vocab, b, pos,
         "<|im_end|>\n<|im_start|>user\nIn one short sentence, what do you physically do right now?<|im_end|>\n<|im_start|>assistant\nI ", false);
@@ -106,9 +128,10 @@ Cognition LlamaBridge::infer(VillagerID id, const PerceptionContext& pc, uint64_
     return { thought, intent, res.verb, res.source };
 }
 
-RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard, uint64_t seed) {
+RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard,
+                                  const std::string& persona, uint64_t seed) {
     (void)id;
-    std::string user = "You overhear someone in the village saying: \"" + heard +
+    std::string user = persona + "You overhear someone in the village saying: \"" + heard +
         "\" In your own words, what do you make of it and pass along to others?";
     llama_chat_message msg[1]; msg[0].role = "user"; msg[0].content = user.c_str();
     const char* tmpl = llama_model_chat_template(model, nullptr);
@@ -132,6 +155,9 @@ RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard, uint64
     llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
 
     std::string out = gen(ctx, vocab, b, pos, chain, 90);
+    trim_to_sentence(out); // §B4 -- MUST happen before hearsay_hop's forced-novelty append
+                           // (live evidence tick 31908: distortion glued onto a truncated
+                           // sentence with no boundary between them)
     llama_sampler_free(chain);
     llama_batch_free(b);
     llama_memory_seq_rm(mem, 0, -1, -1);
@@ -143,11 +169,12 @@ RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard, uint64
     return rr;
 }
 
-std::string LlamaBridge::dream(VillagerID id, const std::vector<std::string>& fragments, uint64_t seed) {
+std::string LlamaBridge::dream(VillagerID id, const std::vector<std::string>& fragments,
+                                const std::string& persona, uint64_t seed) {
     (void)id;
     std::string frag;
     for (size_t i = 0; i < fragments.size(); ++i) frag += "\n- \"" + fragments[i] + "\"";
-    std::string user = "You drift into sleep. Fragments of your memories swirl together:" + frag +
+    std::string user = persona + "You drift into sleep. Fragments of your memories swirl together:" + frag +
         "\nDescribe the strange, surreal dream that forms from them.";
     llama_chat_message msg[1]; msg[0].role = "user"; msg[0].content = user.c_str();
     const char* tmpl = llama_model_chat_template(model, nullptr);
@@ -171,6 +198,7 @@ std::string LlamaBridge::dream(VillagerID id, const std::vector<std::string>& fr
     llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
 
     std::string out = gen(ctx, vocab, b, pos, chain, 100);
+    trim_to_sentence(out); // §B4
     llama_sampler_free(chain);
     llama_batch_free(b);
     llama_memory_seq_rm(mem, 0, -1, -1);
