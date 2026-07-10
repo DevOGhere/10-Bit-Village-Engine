@@ -31,6 +31,15 @@ constexpr uint64_t GROUNDED_FLOOR_MOD = 4; // 1-in-4 = 25%
 constexpr int GRID_W = 32;
 constexpr int GRID_H = 24;
 
+// Run 2 Plan §C1 — world events (famine + wanderer), v1: two types only. Rolled off a
+// DEDICATED RNG stream (pcg32_event_state, seeded like every other per-purpose stream in
+// init()) so it never desyncs anything else. Both the roll and its effects are gated
+// `if (bridge)` at every call site -- headless Phase 0 must never touch this code, proven by
+// `--phase0_gate` (re-run byte-identical to the pre-C1 baseline after this landed).
+constexpr uint64_t EVENT_CHECK_EVERY = 5000; // ~9.7h wall at measured HF throughput
+constexpr uint64_t EVENT_DURATION    = 1000; // famine length, ticks
+enum class VillageEvent : uint8_t { NONE = 0, FAMINE = 1 }; // WANDERER is one-shot, no ongoing state
+
 enum class TaskKind { ACTION, HEARSAY, DREAM };
 
 // An async cognition result resolved at dispatch, folded back into the world at fold_tick.
@@ -85,6 +94,13 @@ public:
     pcg32_state pcg32_physics_state[MAX_VILLAGERS];
     pcg32_state pcg32_cognition_state[MAX_VILLAGERS];
 
+    // §C1 — one dedicated village-wide stream for the event roll (not per-villager: this is
+    // a single shared decision, not 100 independent ones). Isolated the same way physics vs
+    // cognition is -- nothing else ever draws from this.
+    pcg32_state pcg32_event_state;
+    VillageEvent active_event = VillageEvent::NONE;
+    uint64_t event_start_tick = 0; // only meaningful while active_event == FAMINE
+
     // Cognition state (Phase 3)
     CognitiveStore stores[MAX_VILLAGERS];
     uint64_t last_dream_tick[MAX_VILLAGERS];
@@ -117,6 +133,12 @@ public:
         task_seq_counter = 0;
         async_queue.clear();
         coined_words.clear();
+        active_event = VillageEvent::NONE;
+        event_start_tick = 0;
+        // Own offset (0x70000), same splitmix-derived-seed pattern as every other stream --
+        // never collides with the per-villager 0x10000-0x60000 range above.
+        uint64_t e_seed = splitmix64_avalanche(master_seed + 0x70000);
+        pcg32_srandom_r(&pcg32_event_state, e_seed, 2);
         for (uint32_t i = 0; i < MAX_VILLAGERS; ++i) {
             // Seed RNG streams (unchanged from Phase 0 — keeps Phase 0 hashes byte-identical).
             uint64_t p_seed = splitmix64_avalanche(master_seed + i + 0x10000);
@@ -171,6 +193,7 @@ private:
     // --- Phase 3 helpers, defined in src/world.cpp ---
     void dispatch_cognition(VillagerID v);
     void apply_task(const DeferredTask& t);
+    void check_world_event(); // §C1 -- roll/apply/expire, called from tick(), `if (bridge)` gated
     std::vector<VillagerID> neighbours(VillagerID v) const; // Chebyshev r=1, ascending id
     PerceptionContext build_perception(VillagerID v,
                                        const std::vector<VillagerID>& nbrs,

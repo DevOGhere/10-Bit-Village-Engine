@@ -27,6 +27,15 @@ public:
     // Ticks; called periodically from --serve, not every tick (DELETE cost scales with rows).
     void prune_villager_state(uint64_t keep_from_tick);
 
+    // §C2 (Run 2 Plan) -- the OTHER dominant growth term: ~34MB/day of MemoryGraph/
+    // CognitionLog/HearsayChain text (Run 1 measured, 3 tables not 1 like VillagerState).
+    // Only safe to call AFTER a confirmed archive upload covers the range being deleted
+    // (supervisor.py triggers this via SIGUSR2, never on a timer alone) -- unlike
+    // prune_villager_state (whose only consumers are "newest tick" reads, so losing old rows
+    // is never a real loss), this data is genuinely gone from the LIVE db afterward; the
+    // archive release is what makes that safe.
+    void prune_text_tables(uint64_t keep_from_tick);
+
     // Phase 2: append-only persistence of free-text memories (observer interface).
     void persist_memory(const std::string& run_id, VillagerID villager_id, const MemoryEntry& m);
     int  count_memories(const std::string& run_id); // verification only (not used in tick loop)

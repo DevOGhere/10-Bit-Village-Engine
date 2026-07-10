@@ -145,7 +145,10 @@ void Database::init_schema() {
         "   holding_food BLOB,"
         "   pcg32_physics BLOB,"
         "   pcg32_cognition BLOB,"
-        "   last_dream_tick BLOB"
+        "   last_dream_tick BLOB,"
+        "   pcg32_event BLOB,"          // §C1 (Run 2 Plan) -- must round-trip on restore
+        "   active_event INTEGER DEFAULT 0,"
+        "   event_start_tick INTEGER DEFAULT 0"
         ");"
         "CREATE TABLE IF NOT EXISTS CheckpointMemory ("
         "   run_id TEXT,"
@@ -251,6 +254,24 @@ void Database::prune_villager_state(uint64_t keep_from_tick) {
     sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
     // reclaim disk space -- otherwise SQLite keeps the freed pages in the file for reuse,
     // so village.db's on-disk size would never actually shrink after a prune
+    sqlite3_exec(db, "VACUUM;", nullptr, nullptr, nullptr);
+}
+
+void Database::prune_text_tables(uint64_t keep_from_tick) {
+    sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
+    const char* sqls[] = {
+        "DELETE FROM MemoryGraph WHERE tick < ?;",
+        "DELETE FROM CognitionLog WHERE tick < ?;",
+        "DELETE FROM HearsayChain WHERE tick < ?;",
+    };
+    for (const char* sql : sqls) {
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+        sqlite3_bind_int64(stmt, 1, (sqlite3_int64)keep_from_tick);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
     sqlite3_exec(db, "VACUUM;", nullptr, nullptr, nullptr);
 }
 
@@ -449,8 +470,9 @@ void Database::save_checkpoint(const WorldState& w) {
     {
         const char* sql =
             "INSERT INTO EngineCheckpoint (run_id, tick, next_mem_id, task_seq_counter, genomes, needs, "
-            "pos_x, pos_y, holding_food, pcg32_physics, pcg32_cognition, last_dream_tick) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            "pos_x, pos_y, holding_food, pcg32_physics, pcg32_cognition, last_dream_tick, "
+            "pcg32_event, active_event, event_start_tick) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
         sqlite3_stmt* stmt;
         sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
         sqlite3_bind_text(stmt, 1, w.run_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -465,6 +487,9 @@ void Database::save_checkpoint(const WorldState& w) {
         sqlite3_bind_blob(stmt, 10, w.pcg32_physics_state, sizeof(w.pcg32_physics_state), SQLITE_TRANSIENT);
         sqlite3_bind_blob(stmt, 11, w.pcg32_cognition_state, sizeof(w.pcg32_cognition_state), SQLITE_TRANSIENT);
         sqlite3_bind_blob(stmt, 12, w.last_dream_tick, sizeof(w.last_dream_tick), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 13, &w.pcg32_event_state, sizeof(w.pcg32_event_state), SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 14, (int)w.active_event);
+        sqlite3_bind_int64(stmt, 15, (sqlite3_int64)w.event_start_tick);
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
     }
@@ -566,7 +591,8 @@ bool Database::load_checkpoint(WorldState& w) {
     {
         const char* sql =
             "SELECT tick, next_mem_id, task_seq_counter, genomes, needs, pos_x, pos_y, "
-            "holding_food, pcg32_physics, pcg32_cognition, last_dream_tick "
+            "holding_food, pcg32_physics, pcg32_cognition, last_dream_tick, "
+            "pcg32_event, active_event, event_start_tick "
             "FROM EngineCheckpoint WHERE run_id = ?;";
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
         sqlite3_bind_text(stmt, 1, w.run_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -589,6 +615,9 @@ bool Database::load_checkpoint(WorldState& w) {
         copy_blob(8, w.pcg32_physics_state, sizeof(w.pcg32_physics_state));
         copy_blob(9, w.pcg32_cognition_state, sizeof(w.pcg32_cognition_state));
         copy_blob(10, w.last_dream_tick, sizeof(w.last_dream_tick));
+        copy_blob(11, &w.pcg32_event_state, sizeof(w.pcg32_event_state));
+        w.active_event = (VillageEvent)sqlite3_column_int(stmt, 12);
+        w.event_start_tick = (uint64_t)sqlite3_column_int64(stmt, 13);
         sqlite3_finalize(stmt);
     }
 

@@ -22,8 +22,12 @@
 // boundary in the --serve loop, which polls and clears these.
 static volatile sig_atomic_t g_backup_requested = 0;
 static volatile sig_atomic_t g_shutdown_requested = 0;
+static volatile sig_atomic_t g_prune_text_requested = 0; // §C2 -- supervisor.py sends this
+                                                          // ONLY after a confirmed archive
+                                                          // upload, never on a bare timer.
 static void tbv_on_sigusr1(int) { g_backup_requested = 1; }
 static void tbv_on_sigterm(int) { g_shutdown_requested = 1; }
+static void tbv_on_sigusr2(int) { g_prune_text_requested = 1; }
 
 #define TBV_ENGINE_VERSION "65debc3"
 
@@ -114,10 +118,12 @@ int main(int argc, char** argv) {
     bool run_mode = false;
     bool checkpoint_gate = false;
     bool serve_mode = false;
+    bool phase0_gate = false;
     int run_n = 1000;
     int p3_n = 600;
     int coin_n = 1000;
     int ckpt_n = 200;
+    int p0_n = 6000; // must exceed EVENT_CHECK_EVERY (5000) to actually exercise the guard
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -131,7 +137,34 @@ int main(int argc, char** argv) {
         if (arg == "--run")    { run_mode = true; if (i + 1 < argc && argv[i+1][0] != '-') run_n = std::stoi(argv[++i]); }
         if (arg == "--coinage") { coinage = true; if (i + 1 < argc && argv[i+1][0] != '-') coin_n = std::stoi(argv[++i]); }
         if (arg == "--checkpoint_gate") { checkpoint_gate = true; if (i + 1 < argc && argv[i+1][0] != '-') ckpt_n = std::stoi(argv[++i]); }
+        if (arg == "--phase0_gate") { phase0_gate = true; if (i + 1 < argc && argv[i+1][0] != '-') p0_n = std::stoi(argv[++i]); }
         if (arg == "--serve") serve_mode = true;
+    }
+
+    // ---- Phase 0 gate (Run 2 Plan §C1, open item 7): a TRULY headless run -- WorldState
+    // constructed and ticked WITHOUT ever calling attach(), so bridge/db stay nullptr for the
+    // whole run. tick() only calls dispatch_cognition when bridge is set, so this exercises
+    // ONLY the physics loop -- the same code path Phase 0 always meant, before cognition
+    // existed. C1's event system (roll + famine + wanderer) is guarded the same way
+    // (`if (bridge)`), so a headless run should never touch it, at any tick count. Runs past
+    // EVENT_CHECK_EVERY (5000) on purpose -- proves the guard holds across an event-check
+    // boundary, not just "the feature doesn't fire in the first few ticks by luck." Cheap:
+    // pure physics, zero LLM calls, no model load needed at all.
+    if (phase0_gate) {
+        std::cout << "Phase 0 Gate: headless (" << p0_n << " ticks, no bridge attached)\n";
+        tbv::WorldState w; w.init(seed);
+        while (w.current_tick < (uint64_t)p0_n) w.tick();
+        uint64_t h = world_hash(w);
+        // Canonical value pinned 2026-07-10, BEFORE any Run 2 Plan §C1 code existed in this
+        // binary -- established as the true pre-C1 headless baseline, then re-confirmed
+        // byte-identical AFTER C1 landed (world.h/world.cpp event-system changes). That
+        // second confirmation is the actual proof for open item 7, not this hardcoded value
+        // alone -- see the Chillpad packet for both runs' output.
+        uint64_t canonical = 0xc4216ecb37cb74cdULL;
+        bool ok = (h == canonical);
+        std::cout << "world_hash=" << std::hex << h << std::dec
+                   << (ok ? "  ✅ unchanged\n" : "  ❌ DRIFTED\n");
+        return ok ? 0 : 1;
     }
 
     // ---- --serve (Step 5b): long-running host mode. Infinite tick loop, periodic checkpoint,
@@ -147,10 +180,18 @@ int main(int argc, char** argv) {
         if (const char* e = std::getenv("TBV_VILLAGER_STATE_KEEP")) villager_state_keep = std::stoull(e);
         uint64_t prune_every = 1000; // DELETE cost scales with rows -- don't run every tick
         if (const char* e = std::getenv("TBV_PRUNE_EVERY")) prune_every = std::stoull(e);
+        // §C2: text-table retention window, ~2 days at measured throughput (~354 ticks/hr).
+        // Only ever consumed via SIGUSR2 (supervisor.py, post-archive-confirm) -- never on a
+        // bare timer like villager_state_keep above, since this data is genuinely gone from
+        // the live db afterward (VillagerState's prune is safe on a timer because nothing
+        // reads old rows anyway; this one needs the archive to make that true).
+        uint64_t text_keep = 20000;
+        if (const char* e = std::getenv("TBV_TEXT_KEEP")) text_keep = std::stoull(e);
         const std::string run_id = "serve";
 
         std::signal(SIGUSR1, tbv_on_sigusr1);
         std::signal(SIGTERM, tbv_on_sigterm);
+        std::signal(SIGUSR2, tbv_on_sigusr2);
 
         try {
             tbv::LlamaBridge bridge("models/smollm2-360m-instruct-q8_0.gguf");
@@ -195,6 +236,18 @@ int main(int argc, char** argv) {
                                << " engine_version=" TBV_ENGINE_VERSION "\n";
                     } else {
                         std::cout << "backup FAILED at tick " << world.current_tick << "\n" << std::flush;
+                    }
+                }
+
+                // §C2: prune MemoryGraph/CognitionLog/HearsayChain -- only on explicit
+                // request (supervisor.py sends SIGUSR2 immediately after a confirmed archive
+                // upload), trusting that upload just captured everything up to ~now.
+                if (g_prune_text_requested) {
+                    g_prune_text_requested = 0;
+                    if (world.current_tick > text_keep) {
+                        db.prune_text_tables(world.current_tick - text_keep);
+                        std::cout << "pruned text tables before tick "
+                                   << (world.current_tick - text_keep) << "\n" << std::flush;
                     }
                 }
             }
@@ -399,12 +452,17 @@ int main(int argc, char** argv) {
             // generated text/dispatch (B1 grounded floor, B2 persona, B3 fatigue, B4 trim,
             // B6 coinage feedback), so the old value legitimately retires here.
             // RETIRED: 0x567898a5104b509dULL (Step 3, hearsay-degradation fix, 2026-06-22).
-            // NEW canonical (seed 12345, N=200), independently reproduced twice this session:
-            // once via --checkpoint_gate's own run of this exact code path, once via a
-            // separate --phase3 200 process invocation (same-seed rerun byte-identical,
-            // diff-seed(+777) diverges to d05647a264533b0e, emergence intact: hearsay
-            // depth=3, dreams=31).
-            uint64_t canonical = 0xcb224352745e7d19ULL;
+            // RETIRED: 0xcb224352745e7d19ULL (Run 2 Plan Phase B, 2026-07-09/10 -- B1-B6
+            // quality-epoch changes).
+            // NEW canonical (seed 12345, N=200) -- Run 2 Plan Phase C, C1's world-event
+            // system (famine/wanderer roll off a dedicated pcg32_event_state stream) drew
+            // this seed's first roll inside this 200-tick window, legitimately changing
+            // dispatch/generated content once. Independently reproduced twice: once via
+            // --checkpoint_gate's own run of this exact code path, once via a separate
+            // --phase3 200 process invocation (same-seed rerun byte-identical, diff-seed
+            // (+777) diverges to 151af62f7f42506d, emergence intact: hearsay depth=3,
+            // dreams=29).
+            uint64_t canonical = 0xc0bb4b28825f411bULL;
             bool canon_ok = (world_hash(r) == canonical);
             std::cout << "canonical --phase3 200 hash @seed 12345: " << std::hex << world_hash(r)
                       << std::dec << (canon_ok ? "  ✅ unchanged\n" : "  ❌ DRIFTED\n");

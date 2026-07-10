@@ -7,6 +7,7 @@
 #include <cstdlib> // std::abs
 #include <cstdio>  // snprintf
 #include <iterator>
+#include <fstream> // §C1 wanderer_tales() lazy-load
 
 namespace tbv {
 
@@ -30,6 +31,12 @@ static std::string hex64(uint64_t h) {
 // the headless Phase 0 path is therefore byte-identical to before.
 // ============================================================================
 void WorldState::tick() {
+    // ---- §C1: world event roll/expire. Gated `if (bridge)` -- headless Phase 0 must never
+    // reach this, proven by --phase0_gate (byte-identical to the pre-C1 baseline at 6000+
+    // ticks, past an EVENT_CHECK_EVERY boundary). Runs BEFORE dispatch so a fresh famine is
+    // visible to this tick's build_perception() call, not one tick late. ----
+    if (bridge) check_world_event();
+
     // ---- A. DISPATCH: exactly ONE villager does ONE cognition event (LOCK 1). ----
     if (bridge) {
         VillagerID v = (VillagerID)(current_tick % MAX_VILLAGERS);
@@ -49,11 +56,81 @@ void WorldState::tick() {
     // ---- C. PHYSICS: hunger decay (UNCHANGED — keeps Phase 0 hashes byte-identical). ----
     for (uint32_t i = 0; i < MAX_VILLAGERS; ++i) {
         int32_t decay = pcg32_random_bounded_r(&pcg32_physics_state[i], 50);
+        // §C1 famine: double decay while active. Scales the ALREADY-DRAWN result, never
+        // changes the draw itself (pcg32_random_bounded_r's bound parameter must stay fixed
+        // at 50 -- rejection sampling means a different bound consumes a different, variable
+        // number of underlying pcg32 calls, which WOULD desync this stream). Redundant
+        // `bridge &&` here even though active_event can only ever be set inside the
+        // bridge-gated check_world_event() above -- cheap, explicit, matches this file's
+        // existing defense-in-depth style.
+        if (bridge && active_event == VillageEvent::FAMINE) decay *= 2;
         needs[i].hunger -= decay;
         if (needs[i].hunger < 0) needs[i].hunger = 0;
     }
 
     current_tick++;
+}
+
+// §C1 -- ~20 hand-written lines, deterministic pick (own event RNG stream, not text
+// generation). Lazy-loaded once, CWD-relative like assets/dict_en.txt.
+static const std::vector<std::string>& wanderer_tales() {
+    static const std::vector<std::string> tales = [] {
+        std::vector<std::string> out;
+        std::ifstream f("assets/wanderer_tales.txt");
+        std::string line;
+        while (std::getline(f, line)) if (!line.empty()) out.push_back(line);
+        return out;
+    }();
+    return tales;
+}
+
+constexpr int32_t WANDERER_IMPORTANCE = 1800; // "above band -> gets retold immediately" (plan §C1)
+
+// ============================================================================
+// check_world_event — §C1 roll (every EVENT_CHECK_EVERY ticks) + famine expiry. Only ever
+// called from tick() inside `if (bridge)`, so headless Phase 0 never reaches this function
+// at all -- not just "the roll happens to not fire," the code is structurally unreachable.
+// ============================================================================
+void WorldState::check_world_event() {
+    if (active_event == VillageEvent::FAMINE && current_tick >= event_start_tick + EVENT_DURATION) {
+        active_event = VillageEvent::NONE;
+    }
+
+    if (active_event != VillageEvent::NONE || current_tick % EVENT_CHECK_EVERY != 0) return;
+
+    uint32_t roll = (uint32_t)pcg32_random_bounded_r(&pcg32_event_state, 100);
+    if (roll < 25) {
+        active_event = VillageEvent::FAMINE;
+        event_start_tick = current_tick;
+        return;
+    }
+    if (roll >= 50) return; // 50-99: nothing this window
+
+    // WANDERER (25-49): one-shot, no ongoing state. Two more draws off the SAME dedicated
+    // event stream -- target villager, then which tale -- isolated the same way physics vs
+    // cognition already is, so this never touches any other stream's consumption order.
+    const auto& tales = wanderer_tales();
+    if (tales.empty()) return; // asset missing -- fail quiet, not crash (mirrors coinage.h's
+                                // fallback-empty-set behavior when its dict file is absent)
+    uint32_t target = (uint32_t)pcg32_random_bounded_r(&pcg32_event_state, (int32_t)MAX_VILLAGERS);
+    uint32_t idx    = (uint32_t)pcg32_random_bounded_r(&pcg32_event_state, (int32_t)tales.size());
+
+    MemoryEntry e;
+    e.mem_id        = next_mem_id++;
+    e.tick          = current_tick;
+    e.actor_id      = target;
+    e.importance    = WANDERER_IMPORTANCE;
+    e.type          = MemType::EXPERIENCE;
+    e.source_depth  = 0;
+    e.origin_mem_id = e.mem_id; // self-origin, same convention as a firsthand ACTION memory
+    e.text          = tales[idx];
+    std::optional<MemoryEntry> evicted = stores[target].add(e, current_tick);
+    if (db) {
+        db->persist_memory(run_id, target, e);
+        db->log_belief_birth(run_id, e.mem_id, e.type, e.tick, e.importance, e.source_depth,
+                             fnv64_text(e.text));
+        if (evicted) db->mark_belief_death(run_id, evicted->mem_id, current_tick, evicted->origin_mem_id);
+    }
 }
 
 // ============================================================================
@@ -312,6 +389,10 @@ PerceptionContext WorldState::build_perception(VillagerID v,
     if (needs[v].social < 30000)      s << "You feel painfully lonely. ";
     if (needs[v].safety < 30000)      s << "You feel afraid and on edge. ";
     if (env.holding_food)             s << "You are holding some food. ";
+    // §C1: only reaches ACTION-path prompts (build_perception), same scope as trait_prose
+    // before B2 widened persona to retell/dream -- famine isn't threaded further here, the
+    // plan only asked for this one line.
+    if (active_event == VillageEvent::FAMINE) s << "A famine grips the village; food is scarce. ";
     if (!nbrs.empty()) {
         s << "Nearby stand " << nbrs.size() << " other thronglet" << (nbrs.size() > 1 ? "s" : "") << " (";
         for (size_t k = 0; k < nbrs.size(); ++k) { if (k) s << ", "; s << "villager " << nbrs[k]; }

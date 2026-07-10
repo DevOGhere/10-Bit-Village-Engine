@@ -53,6 +53,11 @@ STAGING_MARKER = "staging/backup.done"
 DB_PATH = "village.db"
 BACKUP_TIMEOUT_S = 30
 STALE_AFTER_S = 3600
+# §C2 -- weekly-cadence archive tier, ~60000 ticks at measured ~354 ticks/hr HF throughput
+# (real number, not a guess: packet-5e's measured live rate). Never pruned; kills the ~2GB
+# release-asset wall permanently since the rolling backup-* releases stay small once the
+# text tables get pruned after each confirmed archive.
+ARCHIVE_EVERY_TICKS = int(os.environ.get("TBV_ARCHIVE_EVERY_TICKS", 60000))
 SPECTATOR_POLL_S = 2  # well above the real ~10s/tick cadence; still responsive, cheap to poll
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"  # RFC6455 fixed handshake constant
 WS_BACKLOG_TICKS = 500  # A2: cap a connecting spectator's catch-up frame (Run 2 Plan §A2)
@@ -132,27 +137,33 @@ def gh_request(method, url, data=None, headers=None, raw=False):
 
 
 def restore_on_boot():
-    """Pull the latest release's village.db asset into CWD. No-op on first-ever boot."""
+    """Pull the newest backup-* release's village.db asset into CWD. No-op on first-ever boot."""
     if not TOKEN:
         print("restore: no GITHUB_TOKEN set, skipping (fresh boot)", flush=True)
         return
-    # NOT /releases/latest -- GitHub defines "latest" as the most recent NON-prerelease,
-    # non-draft release, and every backup release here is created with prerelease=True
-    # (coarse-cadence internal artifacts, not public cuts). /releases/latest would silently
-    # 404-equivalent forever. List instead and take releases[0] (API returns newest-first).
+    # C2 (Run 2 Plan §C2, sequencing item 8 -- moved into the cutover per packet 102): the
+    # OLD `releases?per_page=1` took releases[0] = newest release by ANY tag. That was a
+    # landmine even before C2's archive tier existed (a stray non-backup release created
+    # after the last real backup would silently look like "no village.db asset -> fresh
+    # boot", wiping the run's continuity) and is now a certainty once `archive-*` releases
+    # exist alongside `backup-*` ones (weekly cadence, so an archive WILL often be newer
+    # than the latest rolling backup). Filter explicitly to the `backup-` tag prefix instead
+    # -- archives use a different asset name (village-archive.db) anyway, but filtering by
+    # tag first means a differently-named-but-still-matched asset can never masquerade as a
+    # restore point, and this fails closed (fresh boot) rather than restoring the wrong data.
     try:
-        _, body = gh_request("GET", f"{API}/releases?per_page=1")
+        _, body = gh_request("GET", f"{API}/releases?per_page=20")
     except urllib.error.HTTPError as e:
         print(f"restore: API error {e.code}, fresh boot", flush=True)
         return
     releases = json.loads(body)
-    if not releases:
-        print("restore: no releases yet, fresh boot", flush=True)
+    release = next((r for r in releases if r.get("tag_name", "").startswith("backup-")), None)
+    if release is None:
+        print("restore: no backup-* releases in the newest 20, fresh boot", flush=True)
         return
-    release = releases[0]
     asset = next((a for a in release.get("assets", []) if a["name"] == "village.db"), None)
     if not asset:
-        print("restore: latest release has no village.db asset, fresh boot", flush=True)
+        print(f"restore: {release['tag_name']} has no village.db asset, fresh boot", flush=True)
         return
     _, blob = gh_request("GET", asset["url"], headers={"Accept": "application/octet-stream"})
     with open(DB_PATH, "wb") as f:
@@ -202,15 +213,67 @@ def push_world_digest():
 
 
 def prune_old_releases(keep=10):
-    """Keep only the `keep` most recent backup releases (spec §2: retention = keep-last-10).
-    Best-effort -- a failed prune here must not fail the backup that already succeeded."""
+    """Keep only the `keep` most recent BACKUP releases (spec §2: retention = keep-last-10).
+    Best-effort -- a failed prune here must not fail the backup that already succeeded.
+    §C2: filtered to the `backup-` tag prefix -- the old ANY-tag version would eventually
+    prune `archive-*` releases too (the whole point of the archive tier is that they're
+    NEVER pruned), and would also delete the historical `run1-final-archive` cutover
+    artifact once enough backups rolled past it."""
     try:
         _, body = gh_request("GET", f"{API}/releases?per_page=100")
         releases = json.loads(body)
-        for old in releases[keep:]:
+        backups = [r for r in releases if r.get("tag_name", "").startswith("backup-")]
+        for old in backups[keep:]:
             gh_request("DELETE", f"{API}/releases/{old['id']}")
     except Exception as e:
         print(f"prune: non-fatal, {e}", flush=True)
+
+
+def newest_archive_tick():
+    """§C2 -- the newest archive-<tick> release's embedded tick, or None if none exist yet.
+    Deriving the archive cadence from GH state (not a local counter) means it survives
+    container restarts the same way restore_on_boot already does -- no new persistent state."""
+    try:
+        _, body = gh_request("GET", f"{API}/releases?per_page=50")
+    except urllib.error.HTTPError:
+        return None
+    for r in json.loads(body):
+        tag = r.get("tag_name", "")
+        if tag.startswith("archive-"):
+            try:
+                return int(tag.split("-", 1)[1])
+            except ValueError:
+                continue
+    return None
+
+
+def maybe_archive_and_prune(current_tick):
+    """§C2 -- if a weekly-cadence archive is due, upload it (from the SAME staged DB
+    do_backup() just produced -- no second stage needed) then signal the engine to prune
+    MemoryGraph/CognitionLog/HearsayChain rows older than its retention window. The prune
+    is gated on SIGUSR2 specifically so it can only ever happen right after a confirmed
+    archive upload -- never on a bare timer, since this data is genuinely gone from the
+    live db afterward and the archive is what makes that safe."""
+    last_tick = newest_archive_tick()
+    if last_tick is not None and current_tick - last_tick < ARCHIVE_EVERY_TICKS:
+        return
+    tag = f"archive-{current_tick}"
+    try:
+        _, body = gh_request("POST", f"{API}/releases", {"tag_name": tag, "name": tag, "prerelease": True})
+        release = json.loads(body)
+        upload_url = release["upload_url"].split("{")[0]
+        with open(STAGING_DB, "rb") as f:
+            blob = f.read()
+        gh_request("POST", f"{upload_url}?name=village-archive.db", data=blob, raw=True,
+                   headers={"Content-Type": "application/octet-stream"})
+        print(f"archive: uploaded {tag} ({len(blob)} bytes)", flush=True)
+    except Exception as e:
+        print(f"archive: FAILED, not pruning ({e})", flush=True)
+        return
+    if engine_proc is not None and engine_proc.poll() is None:
+        engine_proc.send_signal(signal.SIGUSR2)
+        # exact prune boundary is the engine's own TBV_TEXT_KEEP call -- not duplicated here
+        print(f"archive: sent SIGUSR2 (engine will prune text tables older than its retention window)", flush=True)
 
 
 def do_backup():
@@ -244,6 +307,18 @@ def do_backup():
     push_world_digest()
     prune_old_releases()
     last_backup_ts = time.time()
+
+    # §C2: piggyback the archive-cadence check on the same staged DB this backup just
+    # produced -- no second engine signal/stage round-trip needed to decide "is it due".
+    try:
+        con = sqlite3.connect(STAGING_DB)
+        row = con.execute("SELECT tick FROM EngineCheckpoint ORDER BY tick DESC LIMIT 1").fetchone()
+        con.close()
+        if row is not None:
+            maybe_archive_and_prune(row[0])
+    except Exception as e:
+        print(f"archive: skipped this cycle, non-fatal ({e})", flush=True)
+
     return True, tag
 
 

@@ -396,12 +396,13 @@ def fmt(x, nd=4):
     return str(x)
 
 
-def render_markdown(metrics, label, db_path):
+def render_markdown(metrics, label, db_paths):
     m = metrics["_meta"]
     lines = []
     lines.append(f"# 10-Bit Village — Run Analysis: {label}")
     lines.append("")
-    lines.append(f"Source: `{db_path}`  ")
+    source = db_paths[0] if len(db_paths) == 1 else f"{len(db_paths)} stitched archives: " + ", ".join(db_paths)
+    lines.append(f"Source: `{source}`  ")
     lines.append(f"Tick range: {m['min_tick']}–{m['max_tick']} ({m['n_buckets']} buckets of {m['bucket_size']} ticks)  ")
     lines.append(f"CognitionLog rows analyzed: {metrics['_n_cognition_rows']}")
     lines.append("")
@@ -509,20 +510,61 @@ def try_plots(metrics, out_dir, label):
     return written
 
 
+def open_stitched(paths):
+    """§C2 -- multi-archive stitch mode. `paths` must be oldest-to-newest.
+
+    Two different table shapes, two different join strategies:
+      - MemoryGraph/CognitionLog/HearsayChain/VillagerState are the tables C2's prune-
+        after-archive actually deletes from, so consecutive archives tile disjoint (well,
+        TEXT_KEEP/villager-state-keep-ticks-overlapping) tick WINDOWS of the run's history --
+        stitched here via a UNION ALL across all of them. A TEMP VIEW with the table's own
+        name transparently shadows the real table for every UNQUALIFIED query already in
+        this file (verified: sqlite resolves an unqualified name to the temp schema first),
+        so compute_metrics() needs ZERO changes to consume stitched data.
+      - CoinedWords/CoinageSpread/BeliefSurvival/WorldDigest are NEVER pruned (small,
+        cumulative tables) -- the newest archive already contains the complete history for
+        these, so they're deliberately left un-viewed and just resolve to `main` (the last
+        path, opened as the base connection) as-is. Unioning them would multiply-count every
+        term/belief across however many archives it survived in.
+
+    Overlap caveat, stated plainly rather than silently absorbed: the windowed tables DO
+    overlap by up to one retention window at each archive boundary (a row can appear in both
+    the archive it was pruned-after-covered-by and the next one, if it fell inside that next
+    archive's own un-pruned-yet range at capture time). Bucketed/aggregate metrics here treat
+    that overlap as a small amount of double-counted noise at each seam, not corrected for --
+    acceptable for what this stitch mode is: a convenience read across a long run's archives,
+    not a precision instrument."""
+    if len(paths) == 1:
+        return sqlite3.connect(f"file:{paths[0]}?mode=ro", uri=True), False
+    con = sqlite3.connect(f"file:{paths[-1]}?mode=ro", uri=True)  # newest = main
+    for i, p in enumerate(paths[:-1]):
+        con.execute(f"ATTACH DATABASE 'file:{p}?mode=ro' AS archive{i}")
+    windowed_tables = ["MemoryGraph", "CognitionLog", "HearsayChain", "VillagerState"]
+    aliases = ["main"] + [f"archive{i}" for i in range(len(paths) - 1)]
+    for table in windowed_tables:
+        union_sql = " UNION ALL ".join(f"SELECT * FROM {a}.{table}" for a in aliases)
+        con.execute(f"CREATE TEMP VIEW {table} AS {union_sql}")
+    return con, True
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("db", help="path to village.db")
+    ap.add_argument("db", nargs="+", help="path to village.db, or multiple archive-*.db "
+                                           "paths (oldest-to-newest) for multi-archive stitch mode")
     ap.add_argument("--out", default="replay/reports", help="output dir for report + PNGs")
-    ap.add_argument("--label", default=None, help="label for the report (default: db filename stem)")
+    ap.add_argument("--label", default=None, help="label for the report (default: first db's filename stem)")
     ap.add_argument("--stdout", action="store_true", help="print report to stdout instead of writing files")
     args = ap.parse_args()
 
-    if not os.path.exists(args.db):
-        print(f"error: {args.db} not found", file=sys.stderr)
-        sys.exit(1)
+    for p in args.db:
+        if not os.path.exists(p):
+            print(f"error: {p} not found", file=sys.stderr)
+            sys.exit(1)
 
-    label = args.label or os.path.splitext(os.path.basename(args.db))[0]
-    con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+    label = args.label or os.path.splitext(os.path.basename(args.db[0]))[0]
+    con, stitched = open_stitched(args.db)
+    if stitched:
+        print(f"stitched {len(args.db)} archives: {', '.join(os.path.basename(p) for p in args.db)}")
     try:
         metrics = compute_metrics(con)
     finally:
