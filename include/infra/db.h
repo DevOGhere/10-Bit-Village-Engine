@@ -88,6 +88,21 @@ public:
 
 private:
     sqlite3* db = nullptr;
+
+    // Real bug, caught by AGY (packet 105) on B3's retell_count, same pattern independently
+    // repeated by C1's EngineCheckpoint columns before that catch reached the builder seat:
+    // `CREATE TABLE IF NOT EXISTS` is a documented no-op on a table that already exists --
+    // it does NOT add missing columns. A schema-changing deploy against an EXISTING db
+    // (exactly what the Run 1 -> Run 2 cutover does, however briefly, before backups get
+    // deleted) would silently fail every query touching the new column, load_checkpoint()
+    // returns false cleanly (no crash) and the caller falls back to "fresh boot" -- which
+    // happens to be harmless AT cutover (that's the intended end state anyway) but would
+    // silently wipe REAL accumulated Run 2 progress on any future schema-changing deploy
+    // once Run 2 has real data. Idempotent: checks PRAGMA table_info first, only runs
+    // ALTER TABLE ADD COLUMN if genuinely missing -- safe to call on a freshly-created table
+    // too (where the column was already in the CREATE TABLE text and this becomes a no-op).
+    void ensure_column(const std::string& table, const std::string& column,
+                       const std::string& col_def_sql);
 };
 
 } // namespace tbv

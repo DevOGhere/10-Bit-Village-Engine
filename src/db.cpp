@@ -204,6 +204,37 @@ void Database::init_schema() {
         sqlite3_free(errmsg);
         throw std::runtime_error("Schema init failed: " + err);
     }
+
+    // Migrate columns CREATE TABLE IF NOT EXISTS can't add to a table that already existed
+    // pre-B3/pre-C1 (see db.h comment on ensure_column -- this is what makes cutover against
+    // a real Run 1 db safe rather than accidentally-safe).
+    ensure_column("CheckpointMemory", "retell_count", "INTEGER DEFAULT 0");
+    ensure_column("EngineCheckpoint", "pcg32_event", "BLOB");
+    ensure_column("EngineCheckpoint", "active_event", "INTEGER DEFAULT 0");
+    ensure_column("EngineCheckpoint", "event_start_tick", "INTEGER DEFAULT 0");
+}
+
+void Database::ensure_column(const std::string& table, const std::string& column,
+                             const std::string& col_def_sql) {
+    std::string pragma_sql = "PRAGMA table_info(" + table + ");";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, pragma_sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return;
+    bool exists = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* name = sqlite3_column_text(stmt, 1); // table_info col 1 = name
+        if (name && column == reinterpret_cast<const char*>(name)) { exists = true; break; }
+    }
+    sqlite3_finalize(stmt);
+    if (exists) return;
+
+    std::string alter_sql = "ALTER TABLE " + table + " ADD COLUMN " + column + " " + col_def_sql + ";";
+    char* errmsg = nullptr;
+    if (sqlite3_exec(db, alter_sql.c_str(), nullptr, nullptr, &errmsg) != SQLITE_OK) {
+        std::string err(errmsg ? errmsg : "unknown error");
+        sqlite3_free(errmsg);
+        throw std::runtime_error("Column migration failed (" + table + "." + column + "): " + err);
+    }
+    std::cout << "db: migrated " << table << " -- added column " << column << "\n" << std::flush;
 }
 
 void Database::log_tick_state(const WorldState& state) {
