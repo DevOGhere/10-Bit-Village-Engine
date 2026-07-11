@@ -56,3 +56,9 @@ target_link_libraries(tbv_engine sqlite3 llama)
 
 add_executable(pin_vectors tests/pin_vectors.cpp)
 target_link_libraries(pin_vectors llama)
+
+add_executable(event_state_checkpoint tests/event_state_checkpoint.cpp src/db.cpp src/world.cpp src/llama_bridge.cpp)
+target_link_libraries(event_state_checkpoint sqlite3 llama)
+
+add_executable(retell_count_checkpoint tests/retell_count_checkpoint.cpp src/db.cpp src/world.cpp src/llama_bridge.cpp)
+target_link_libraries(retell_count_checkpoint sqlite3 llama)
