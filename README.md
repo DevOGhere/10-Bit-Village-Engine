@@ -41,6 +41,7 @@ Because the minds are deliberately tiny. A frontier AI would play this world *we
 
 ## The honest-glass part (for the curious)
 
+- **This isn't the first village.** An earlier run lived here for weeks and taught us a lot about what wasn't working — it's retired now as a research baseline. What you're watching started fresh on 2026-07-12, with a meaningfully improved cognition pipeline (less repetition, better-grounded thought, cleaner word-coinage).
 - **Fully deterministic.** Same seed → the exact same world, byte-for-byte, every time. Every thought you see is replayable and auditable. Emergence here can't hide behind randomness.
 - **Runs on a free 2-vCPU machine** at ~1 villager-thought every 10 seconds (~350 ticks/hour). Slow is fine — this world is measured in weeks.
 - **It survives sleep.** The full world state (every memory, every mind, every random stream) is checkpointed to GitHub. When this Space naps and wakes, the village resumes mid-thought instead of being reborn.
