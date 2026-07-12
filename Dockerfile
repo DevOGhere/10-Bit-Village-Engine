@@ -26,6 +26,8 @@ COPY CMakeLists.txt ./
 COPY src/ src/
 COPY include/ include/
 COPY tests/pin_vectors.cpp tests/pin_vectors.cpp
+COPY tests/event_state_checkpoint.cpp tests/event_state_checkpoint.cpp
+COPY tests/retell_count_checkpoint.cpp tests/retell_count_checkpoint.cpp
 
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTBV_DEPLOY_TARGET=hf \
     && cmake --build build -j"$(nproc)" --target tbv_engine
