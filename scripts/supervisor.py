@@ -4,6 +4,12 @@ POST /backup + GET /health. Restore-on-boot pulls the latest village.db release 
 the dedicated data repo before the engine starts, so an HF sleep/reschedule resumes the same
 run instead of resetting to tick 0 (the point of Step 4's EngineCheckpoint).
 
+Run 1 -> Run 2 cutover (2026-07-12): all `backup-*` releases in the data repo were
+deleted (full history preserved separately as the non-`backup-`-prefixed
+`run1-full-history-tick77926` release, which restore_on_boot's tag-prefix filter
+will never match) so the next boot finds nothing to restore and starts fresh at
+tick 0 under the upgraded Phase A/B/C cognition code.
+
 GITHUB_TOKEN and TBV_BACKUP_TOKEN are HF Space secrets (env vars), never committed.
 TBV_BACKUP_TOKEN gates POST /backup (Bearer auth, 401 on missing/wrong) -- required per
 MSG_075 §3.5/§5d: the Space's own privacy setting is not a substitute for authenticating
