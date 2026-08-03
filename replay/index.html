@@ -54,18 +54,35 @@
 <div id="introOverlay" class="hidden">
     <div id="introCard">
         <h1>🐠 What am I watching?</h1>
-        <p>100 tiny AI villagers — each one a 360-million-parameter language model — living
-        continuously in a fully deterministic world. Roughly every 10 seconds, one villager
-        gets its turn to <em>think</em>: free-form, unscripted, its own. The engine turns
-        that thought into an action.</p>
+        <p>A village of 100 tiny AI minds. Each villager runs its own instance of a real
+        (very small) language model, and roughly every 10 seconds one of them gets a turn
+        to think: freely, unscripted, whatever comes to it. The engine reads that thought
+        and turns it into an action in the world.</p>
+        <p><strong>Why "10-Bit"?</strong> Every villager is born with a 10-bit genome:
+        five personality traits (curiosity, suspicion, sociability, aggression, generosity),
+        two bits each. That's not a nickname, it's literally where the name comes from.
+        The genome isn't flavour text either: the C++ engine enforces it as physics. A
+        villager with generosity locked at zero physically cannot share food, no matter
+        what its thoughts say. The language model just colours how that hard-coded bias
+        comes out in words.</p>
+        <p><strong>Why 100 of them?</strong> Gossip needs a crowd. One villager can't
+        grow a myth, but a hundred passing a story hand to hand, each one distorting it a
+        little through their own genome, can. A hundred is also about as many minds as
+        this little free server can keep thinking in real time.</p>
+        <p><strong>Why this setup?</strong> Nothing here is scripted, there's no dialogue
+        tree or story engine, just a small model thinking freely inside a strict,
+        fully deterministic world. Same seed, same starting state, always plays out
+        byte-for-byte identical, so what looks unpredictable is actually completely
+        reproducible. Real freedom on the inside, hard rules on the outside: that's the
+        whole experiment.</p>
         <p class="legend">
             <span class="badge EXPERIENCE">MOMENT</span> a first-hand thought &nbsp;·&nbsp;
-            <span class="badge HEARSAY">GOSSIP</span> retelling <em>someone else's</em> memory —
-            stories mutate with every hop; that drift is mythology forming &nbsp;·&nbsp;
-            <span class="badge DREAM">DREAM</span> a lonely mind recombining its memories
+            <span class="badge HEARSAY">GOSSIP</span> retelling <em>someone else's</em> memory,
+            mutating a little with every hop, that drift is mythology forming &nbsp;·&nbsp;
+            <span class="badge DREAM">DREAM</span> a lonely mind recombining its own memories
         </p>
-        <p>Click a villager to follow it. Blue arcs show gossip travelling between minds.
-        Slow is normal — this world is measured in weeks, not minutes.</p>
+        <p>Click a villager to follow it. Blue arcs show gossip moving between minds.
+        Go easy on the expectations: this world runs in weeks, not minutes.</p>
         <button id="introDismiss">Watch the tank</button>
     </div>
 </div>
