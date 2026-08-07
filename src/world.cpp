@@ -176,9 +176,12 @@ void WorldState::dispatch_cognition(VillagerID v) {
 
     // ---- 2. DREAM (cooldown + lonely-or-roll) — checked before hearsay so it isn't starved. ----
     if (!survival && can_dream) {
+        // §Run 3 Fix F: recombine the villager's most SALIENT memories, not its most recent
+        // (the old backward-walk-from-.all() picked strictly-newest-3 regardless of
+        // importance). top_salient's comparator is a strict total order (effective_importance
+        // desc, mem_id desc) so this stays deterministic across identical stores.
         std::vector<std::string> frags;
-        const auto& mems = stores[v].all();
-        for (size_t k = mems.size(); k-- > 0 && frags.size() < 3; ) frags.push_back(mems[k].text);
+        for (const auto* m : stores[v].top_salient(current_tick, 3)) frags.push_back(m->text);
         if (!frags.empty()) {
             t.kind          = TaskKind::DREAM;
             t.mtype         = MemType::DREAM;

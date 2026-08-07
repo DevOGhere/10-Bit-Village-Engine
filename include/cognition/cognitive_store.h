@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <algorithm>
 #include "core/types.h"
 
 namespace tbv {
@@ -102,6 +103,31 @@ public:
 
     size_t size() const { return mems_.size(); }
     const std::vector<MemoryEntry>& all() const { return mems_; }
+
+    // Run 3 Fix F: the top-k most salient memories, for DREAM to recombine instead of
+    // whatever's most recent (world.cpp's old backward-walk-from-.all() bug). Strict total
+    // order, same comparator shape as most_salient()/evict_lowest() above: effective_importance
+    // desc, then mem_id desc as the final tiebreak. mem_id is unique and monotonic
+    // (WorldState::next_mem_id), so this alone realizes both "newest wins ties" (packet 045)
+    // and "no two memories ever compare equal" -- required because std::partial_sort is NOT
+    // stable, so a comparator that only looked at effective_importance would let equal-score
+    // memories fall back to container/iteration order, which would silently poison the
+    // determinism gate this whole engine is built around.
+    std::vector<const MemoryEntry*> top_salient(uint64_t current_tick, size_t k) const {
+        std::vector<const MemoryEntry*> ptrs;
+        ptrs.reserve(mems_.size());
+        for (const auto& m : mems_) ptrs.push_back(&m);
+        size_t n = std::min(k, ptrs.size());
+        std::partial_sort(ptrs.begin(), ptrs.begin() + n, ptrs.end(),
+            [current_tick](const MemoryEntry* a, const MemoryEntry* b) {
+                int32_t ea = effective_importance(*a, current_tick);
+                int32_t eb = effective_importance(*b, current_tick);
+                if (ea != eb) return ea > eb;
+                return a->mem_id > b->mem_id;
+            });
+        ptrs.resize(n);
+        return ptrs;
+    }
 
     // §B3 — bump retell_count on the memory a hearsay hop just read from. Engine dispatch
     // is strictly sequential (LOCK 1), so this is deterministic. Finds-and-mutates an
