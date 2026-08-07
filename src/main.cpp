@@ -69,6 +69,14 @@ static uint64_t world_hash(const tbv::WorldState& w) {
             h = fnv_str(h, m.text);
         }
     }
+    // Run 3 Fix A: fold in the one piece of tile state that actually mutates (regrow_tick --
+    // positions are a pure function of seed, never change, and aren't hashed for the same
+    // reason genome isn't: nothing to prove by hashing a constant). NOTE: this unconditionally
+    // shifts the FNV chain by N_FOOD_TILES more multiplications even when every value is still
+    // 0 (headless/Phase 0 mode never touches tile state) -- world_hash has no `if (bridge)`
+    // branch to gate this behind, so --phase0_gate's pinned canonical necessarily changes too.
+    // Deliberate, not a bug: see the re-baseline at that gate's canonical constant below.
+    for (uint32_t i = 0; i < tbv::N_FOOD_TILES; ++i) h = fnv_u64(h, w.food_tile_regrow_tick[i]);
     return h;
 }
 
@@ -160,7 +168,15 @@ int main(int argc, char** argv) {
         // byte-identical AFTER C1 landed (world.h/world.cpp event-system changes). That
         // second confirmation is the actual proof for open item 7, not this hardcoded value
         // alone -- see the Chillpad packet for both runs' output.
-        uint64_t canonical = 0xc4216ecb37cb74cdULL;
+        // RETIRED: 0xc4216ecb37cb74cdULL (pre-Run-3, held through C1).
+        // NEW canonical (seed 12345, N=6000) -- Run 3 Fix A, DELIBERATE re-baseline, not
+        // drift. world_hash() now unconditionally folds in food_tile_regrow_tick[N_FOOD_TILES]
+        // (main.cpp world_hash(), Run 3 Fix A) -- there's no `if (bridge)` branch inside
+        // world_hash() to gate that behind, so even an all-zero regrow_tick array (headless
+        // mode never touches tile state -- the array genuinely never changes here) shifts the
+        // FNV chain by N_FOOD_TILES more multiplications versus the pre-Fix-A hash shape.
+        // Decided before running this gate, not discovered as an unexplained ❌ afterward.
+        uint64_t canonical = 0xc8980416fa26354dULL;
         bool ok = (h == canonical);
         std::cout << "world_hash=" << std::hex << h << std::dec
                    << (ok ? "  ✅ unchanged\n" : "  ❌ DRIFTED\n");
@@ -454,15 +470,23 @@ int main(int argc, char** argv) {
             // RETIRED: 0x567898a5104b509dULL (Step 3, hearsay-degradation fix, 2026-06-22).
             // RETIRED: 0xcb224352745e7d19ULL (Run 2 Plan Phase B, 2026-07-09/10 -- B1-B6
             // quality-epoch changes).
-            // NEW canonical (seed 12345, N=200) -- Run 2 Plan Phase C, C1's world-event
-            // system (famine/wanderer roll off a dedicated pcg32_event_state stream) drew
-            // this seed's first roll inside this 200-tick window, legitimately changing
-            // dispatch/generated content once. Independently reproduced twice: once via
-            // --checkpoint_gate's own run of this exact code path, once via a separate
-            // --phase3 200 process invocation (same-seed rerun byte-identical, diff-seed
-            // (+777) diverges to 151af62f7f42506d, emergence intact: hearsay depth=3,
-            // dreams=29).
-            uint64_t canonical = 0xc0bb4b28825f411bULL;
+            // RETIRED: 0xc0bb4b28825f411bULL (C1 world-event system, held through Run 2).
+            // Run 3 (2026-08-07) legitimately retired this once per fix, each independently
+            // gated via a separate --phase3 200 process invocation (same-seed determinism +
+            // diff-seed divergence + emergence checks) before being folded in here:
+            //   Fix C (coinage filter)         -> ed0f8dc3d3d07ead
+            //   Fix D (decay curve) / Fix F (dream salience) -- both left this UNCHANGED at
+            //     N=200 (not a bug: no eviction happens yet at 200 ticks, cap is 500, and
+            //     each villager dispatches at most ~2 times in this window -- see the Run 3
+            //     plan doc's baseline table for why this null result is expected, not a
+            //     wiring failure. Confirmed landed via direct/standalone unit checks instead.)
+            //   Fix B (social/safety decay)    -> 900708af92ec3481 (DID change at N=200,
+            //     unlike D/F -- runs every physics tick regardless of dispatch cadence)
+            // NEW canonical (seed 12345, N=200) -- Run 3 Fix A (ground food tiles). Also
+            // forced a deliberate --phase0_gate re-baseline (world_hash()'s food_tile_
+            // regrow_tick fold-in has no `if (bridge)` branch to gate behind, unlike every
+            // other Run 3 change) -- see that gate's canonical constant/comment above.
+            uint64_t canonical = 0xb70b7d33d60e3230ULL;
             bool canon_ok = (world_hash(r) == canonical);
             std::cout << "canonical --phase3 200 hash @seed 12345: " << std::hex << world_hash(r)
                       << std::dec << (canon_ok ? "  ✅ unchanged\n" : "  ❌ DRIFTED\n");

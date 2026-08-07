@@ -62,3 +62,6 @@ target_link_libraries(event_state_checkpoint sqlite3 llama)
 
 add_executable(retell_count_checkpoint tests/retell_count_checkpoint.cpp src/db.cpp src/world.cpp src/llama_bridge.cpp)
 target_link_libraries(retell_count_checkpoint sqlite3 llama)
+
+add_executable(food_tile_checkpoint tests/food_tile_checkpoint.cpp src/db.cpp src/world.cpp src/llama_bridge.cpp)
+target_link_libraries(food_tile_checkpoint sqlite3 llama)

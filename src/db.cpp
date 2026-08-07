@@ -212,6 +212,13 @@ void Database::init_schema() {
     ensure_column("EngineCheckpoint", "pcg32_event", "BLOB");
     ensure_column("EngineCheckpoint", "active_event", "INTEGER DEFAULT 0");
     ensure_column("EngineCheckpoint", "event_start_tick", "INTEGER DEFAULT 0");
+    // Run 3 Fix A -- tile positions are NOT persisted (pure function of seed, init() always
+    // runs before load_checkpoint(), see world.h comment on food_tile_x/y). Only regrow_tick
+    // needs the round-trip. NULL on an old (pre-Fix-A) checkpoint row reads back as an all-zero
+    // blob via copy_blob's length check below (n=0 != expected -> no-op, array stays at
+    // init()'s all-zero "every tile available" default) -- correct behavior, not a migration
+    // hazard.
+    ensure_column("EngineCheckpoint", "food_tile_regrow_tick", "BLOB");
 }
 
 void Database::ensure_column(const std::string& table, const std::string& column,
@@ -502,8 +509,8 @@ void Database::save_checkpoint(const WorldState& w) {
         const char* sql =
             "INSERT INTO EngineCheckpoint (run_id, tick, next_mem_id, task_seq_counter, genomes, needs, "
             "pos_x, pos_y, holding_food, pcg32_physics, pcg32_cognition, last_dream_tick, "
-            "pcg32_event, active_event, event_start_tick) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            "pcg32_event, active_event, event_start_tick, food_tile_regrow_tick) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
         sqlite3_stmt* stmt;
         sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
         sqlite3_bind_text(stmt, 1, w.run_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -521,6 +528,7 @@ void Database::save_checkpoint(const WorldState& w) {
         sqlite3_bind_blob(stmt, 13, &w.pcg32_event_state, sizeof(w.pcg32_event_state), SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 14, (int)w.active_event);
         sqlite3_bind_int64(stmt, 15, (sqlite3_int64)w.event_start_tick);
+        sqlite3_bind_blob(stmt, 16, w.food_tile_regrow_tick, sizeof(w.food_tile_regrow_tick), SQLITE_TRANSIENT);
         sqlite3_step(stmt);
         sqlite3_finalize(stmt);
     }
@@ -623,7 +631,7 @@ bool Database::load_checkpoint(WorldState& w) {
         const char* sql =
             "SELECT tick, next_mem_id, task_seq_counter, genomes, needs, pos_x, pos_y, "
             "holding_food, pcg32_physics, pcg32_cognition, last_dream_tick, "
-            "pcg32_event, active_event, event_start_tick "
+            "pcg32_event, active_event, event_start_tick, food_tile_regrow_tick "
             "FROM EngineCheckpoint WHERE run_id = ?;";
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
         sqlite3_bind_text(stmt, 1, w.run_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -649,6 +657,10 @@ bool Database::load_checkpoint(WorldState& w) {
         copy_blob(11, &w.pcg32_event_state, sizeof(w.pcg32_event_state));
         w.active_event = (VillageEvent)sqlite3_column_int(stmt, 12);
         w.event_start_tick = (uint64_t)sqlite3_column_int64(stmt, 13);
+        // Run 3 Fix A: on a pre-Fix-A checkpoint row this column is NULL -> n=0 != expected ->
+        // copy_blob no-ops, array stays at init()'s all-zero "every tile available" default.
+        // Correct behavior, not a migration hazard (see ensure_column's comment above).
+        copy_blob(14, w.food_tile_regrow_tick, sizeof(w.food_tile_regrow_tick));
         sqlite3_finalize(stmt);
     }
 

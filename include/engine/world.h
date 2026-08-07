@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstdlib> // std::abs
 #include <vector>
 #include <algorithm>
 #include <set>
@@ -61,6 +62,17 @@ constexpr int32_t DREAM_SOCIAL_RECOVERY  = 2000; // small -- a dream isn't real 
 constexpr int32_t SAFETY_DECAY_PER_TICK    = 100;
 constexpr int32_t SAFETY_RECOVERY_PER_TICK = 30;
 
+// Run 3 Fix A — regrowing ground food. Starting constants, NOT locked (same status as Fix
+// B's above): system-wide hunger decay ~= 100 villagers x ~24.5 avg/tick ~= 2,450 units/tick;
+// one EAT restores 40,000, so equilibrium needs ~1 successful EAT every ~16 ticks. N/REGROW
+// ~= 1/16 gives this starting point, deliberately looser than the bare ratio since MOVE_TO
+// stays a pure random walk (Finding 1's fix, not directed foraging -- see plan §0.1 scope
+// fence, MSG_034) so a critical villager can't seek a tile, only stumble onto one. Needs the
+// N=15/20/25 x REGROW=200/250/300 sensitivity sweep (post-cutover combined scratch run)
+// before these are trusted, not hand-tuned here.
+constexpr size_t   N_FOOD_TILES        = 20;
+constexpr uint64_t FOOD_REGROW_PERIOD  = 250;
+
 enum class TaskKind { ACTION, HEARSAY, DREAM };
 
 // An async cognition result resolved at dispatch, folded back into the world at fold_tick.
@@ -110,6 +122,18 @@ public:
     uint16_t pos_x[MAX_VILLAGERS];
     uint16_t pos_y[MAX_VILLAGERS];
     bool holding_food[MAX_VILLAGERS];
+
+    // Run 3 Fix A — ground food tiles. Positions are fixed at genesis (splitmix64_avalanche
+    // from master_seed, same non-stream pattern holding_food already uses) and NEVER mutate,
+    // so unlike every array above they are deliberately NOT persisted in EngineCheckpoint --
+    // --serve's boot always calls init(seed) before load_checkpoint(), so init() alone always
+    // reconstructs them correctly on restart, the same way genome would if it weren't
+    // (redundantly, harmlessly) also blobbed for consistency with this codebase's existing
+    // precedent. regrow_tick DOES mutate (a tile goes unavailable until regrow_tick <= tick
+    // once eaten) and is the one piece of tile state that needs the checkpoint round-trip.
+    uint16_t food_tile_x[N_FOOD_TILES];
+    uint16_t food_tile_y[N_FOOD_TILES];
+    uint64_t food_tile_regrow_tick[N_FOOD_TILES]; // 0 = available from genesis
 
     // Two isolated RNG streams per villager: LLM retry/cognition never desyncs physics.
     pcg32_state pcg32_physics_state[MAX_VILLAGERS];
@@ -182,6 +206,36 @@ public:
             holding_food[i] = (splitmix64_avalanche(master_seed + i + 0x50000) & 1ULL) != 0;
             last_dream_tick[i] = 0;
         }
+
+        // Run 3 Fix A — tile positions, fixed forever at genesis. New offset range (0x80000/
+        // 0x90000) so it can never collide with the per-villager 0x10000-0x70000 range above
+        // (villager index i only ever reaches MAX_VILLAGERS-1=99, leaving huge headroom).
+        // regrow_tick=0 means available from tick 0 -- matches EngineCheckpoint's restore path
+        // (a checkpoint that predates this fix, or a fresh genesis, both correctly read as
+        // "every tile available").
+        for (uint32_t i = 0; i < N_FOOD_TILES; ++i) {
+            food_tile_x[i] = (uint16_t)(splitmix64_avalanche(master_seed + i + 0x80000) % GRID_W);
+            food_tile_y[i] = (uint16_t)(splitmix64_avalanche(master_seed + i + 0x90000) % GRID_H);
+            food_tile_regrow_tick[i] = 0;
+        }
+    }
+
+    // Run 3 Fix A — index of the lowest-numbered AVAILABLE food tile within Chebyshev r=1 of
+    // villager v (on or adjacent), else -1. Iterating ascending and returning the first hit
+    // gives the deterministic lowest-tile-index tiebreak for free when a villager is in reach
+    // of more than one available tile at once. Called both at dispatch time (as a verb-
+    // selection hint via env.food_in_reach) and again at apply time (as the authoritative,
+    // re-checked source of truth for which tile actually gets consumed -- see apply_task's
+    // EAT case; the dispatch-time call never mutates state itself).
+    int nearest_available_food_tile(VillagerID v, uint64_t tick) const {
+        int vx = pos_x[v], vy = pos_y[v];
+        for (size_t i = 0; i < N_FOOD_TILES; ++i) {
+            if (food_tile_regrow_tick[i] > tick) continue;
+            int dx = std::abs((int)food_tile_x[i] - vx);
+            int dy = std::abs((int)food_tile_y[i] - vy);
+            if (std::max(dx, dy) <= 1) return (int)i;
+        }
+        return -1;
     }
 
     // Wire live cognition + persistence (call before --run; leave unset for Phase 0).

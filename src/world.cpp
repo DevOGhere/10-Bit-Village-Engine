@@ -166,14 +166,22 @@ void WorldState::dispatch_cognition(VillagerID v) {
 
     Env env;
     env.holding_food = holding_food[v];
-    env.food_in_reach = holding_food[v];      // no ground-food model in v1
+    // Run 3 Fix A: real ground-food model. This is a verb-selection HINT only -- resolver.h's
+    // FLOOR/valid_in_env/biological_urge already read (holding_food || food_in_reach) with no
+    // changes needed there. The authoritative, re-checked tile consumption happens in
+    // apply_task's EAT case at fold_tick, not here (see that comment for why).
+    env.food_in_reach = nearest_available_food_tile(v, current_tick) >= 0;
     env.neighbour_present = !nbrs.empty();
 
     // Cognition seed for this event (consumes the per-villager cognition stream).
     uint32_t r = pcg32_random_r(&pcg32_cognition_state[v]);
     uint64_t cseed = splitmix64_avalanche(((uint64_t)r << 16) ^ ((uint64_t)v << 32) ^ current_tick);
 
-    bool survival = (needs[v].hunger <= HUNGER_CRIT && holding_food[v]);
+    // Run 3 Fix A: a starving villager standing on/adjacent to an available tile must be
+    // forced down the ACTION path (same as one already holding food) -- without this, a
+    // critical villager in reach of ground food but not holding any could still get routed to
+    // DREAM/HEARSAY instead of EAT.
+    bool survival = (needs[v].hunger <= HUNGER_CRIT && (holding_food[v] || env.food_in_reach));
 
     // §B1 GROUNDED_FLOOR: every GROUNDED_FLOOR_MODth cognition turn is forced down the
     // ACTION path (25% at MOD=4), so firsthand experience isn't starved by dream/hearsay
@@ -301,6 +309,24 @@ void WorldState::apply_task(const DeferredTask& t) {
                     needs[t.villager_id].hunger =
                         std::min(FIXED_POINT_ONE, needs[t.villager_id].hunger + 40000);
                     holding_food[t.villager_id] = false;
+                } else {
+                    // Run 3 Fix A: ground-eat path. Re-checked HERE at apply/fold_tick time,
+                    // never trusted from dispatch-time env.food_in_reach -- that was only a
+                    // hint for verb selection. Another villager's apply_task earlier in this
+                    // same tick's strict (villager_id, fold_tick, task_seq_id) order may have
+                    // already consumed the tile this one was aiming for; nearest_available_
+                    // food_tile re-derives fresh against live regrow_tick state, so a second
+                    // claimant simply finds nothing available and falls through as a no-op --
+                    // same as any other resolved-but-now-invalid action, never mints food from
+                    // an already-consumed tile. Safe to recompute position here: this villager
+                    // dispatches (and thus can MOVE_TO) only once per MAX_VILLAGERS ticks, so
+                    // its own position is stable across its own dispatch-to-apply gap.
+                    int tile = nearest_available_food_tile(t.villager_id, current_tick);
+                    if (tile >= 0) {
+                        needs[t.villager_id].hunger =
+                            std::min(FIXED_POINT_ONE, needs[t.villager_id].hunger + 40000);
+                        food_tile_regrow_tick[tile] = current_tick + FOOD_REGROW_PERIOD;
+                    }
                 }
                 break;
             case Verb::MOVE_TO: {
