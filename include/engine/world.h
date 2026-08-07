@@ -40,6 +40,27 @@ constexpr uint64_t EVENT_CHECK_EVERY = 5000; // ~9.7h wall at measured HF throug
 constexpr uint64_t EVENT_DURATION    = 1000; // famine length, ticks
 enum class VillageEvent : uint8_t { NONE = 0, FAMINE = 1 }; // WANDERER is one-shot, no ongoing state
 
+// Run 3 Fix B — social & safety decay (Finding 2: previously never moved from 100000 at all).
+// Starting constants, NOT locked -- same "needs empirical validation" status as Fix A's tile
+// constants, gated together in the post-cutover combined scratch run, not hand-tuned here.
+// Social: fixed per-tick decay (no RNG draw -- deterministic, no new stream needed), roughly
+// matching hunger's ~24.5 avg/tick so isolation drains on a comparable timescale. Floored
+// (not driven to 0) so isolation reads as "lonely" (crosses build_perception's <30000 prompt
+// threshold) not "catatonic" -- Finding 6 measured 19.5-28.7% of dispatch-turns isolated, with
+// no SPEAK/HEARSAY recovery path reachable for that slice; DREAM's small passive recovery
+// (apply_task) is the only reachable recovery for a fully isolated villager.
+constexpr int32_t SOCIAL_DECAY_PER_TICK  = 20;
+constexpr int32_t SOCIAL_ISOLATION_FLOOR = 20000;
+constexpr int32_t DREAM_SOCIAL_RECOVERY  = 2000; // small -- a dream isn't real company
+// Safety: stress model, not hunger-style monotonic drain -- decays only while a famine is
+// active (source-verified: FAMINE is a fixed periodic roll off a dedicated stream, ~25% of
+// every EVENT_CHECK_EVERY window, zero dependence on hunger/Fix A), recovers passively once
+// it ends. Decay rate sized so a full EVENT_DURATION=1000-tick famine can plausibly drive
+// safety into build_perception's <30000 "afraid" band; recovery deliberately slower than
+// decay -- stress lingering past the immediate threat, not snapping back instantly.
+constexpr int32_t SAFETY_DECAY_PER_TICK    = 100;
+constexpr int32_t SAFETY_RECOVERY_PER_TICK = 30;
+
 enum class TaskKind { ACTION, HEARSAY, DREAM };
 
 // An async cognition result resolved at dispatch, folded back into the world at fold_tick.

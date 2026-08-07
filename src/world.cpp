@@ -68,6 +68,29 @@ void WorldState::tick() {
         if (needs[i].hunger < 0) needs[i].hunger = 0;
     }
 
+    // ---- Run 3 Fix B: social & safety decay. `if (bridge)`-gated the same way §C1 events
+    // are -- social decay depends on neighbours(), which is fully live headless, so leaving it
+    // ungated would silently change --phase0_gate's hash (the hunger loop above is deliberately
+    // UNCHANGED to keep Phase 0 byte-identical; this preserves that invariant for the new
+    // fields the same way C1 did for events). Safety decay is already inert headless (FAMINE
+    // only ever set inside bridge-gated check_world_event()) but gated explicitly anyway, same
+    // defense-in-depth style as the redundant `bridge &&` on the famine-hunger-double above. ----
+    if (bridge) {
+        for (uint32_t i = 0; i < MAX_VILLAGERS; ++i) {
+            if (neighbours(i).empty() && needs[i].social > SOCIAL_ISOLATION_FLOOR) {
+                needs[i].social -= SOCIAL_DECAY_PER_TICK;
+                if (needs[i].social < SOCIAL_ISOLATION_FLOOR) needs[i].social = SOCIAL_ISOLATION_FLOOR;
+            }
+            if (active_event == VillageEvent::FAMINE) {
+                needs[i].safety -= SAFETY_DECAY_PER_TICK;
+                if (needs[i].safety < 0) needs[i].safety = 0;
+            } else if (needs[i].safety < FIXED_POINT_ONE) {
+                needs[i].safety += SAFETY_RECOVERY_PER_TICK;
+                if (needs[i].safety > FIXED_POINT_ONE) needs[i].safety = FIXED_POINT_ONE;
+            }
+        }
+    }
+
     current_tick++;
 }
 
@@ -308,6 +331,14 @@ void WorldState::apply_task(const DeferredTask& t) {
             case Verb::WAIT:
             default: break;
         }
+    } else if (t.kind == TaskKind::DREAM) {
+        // Run 3 Fix B: isolated villagers' only reachable social-recovery path -- SPEAK/HEARSAY
+        // both require a neighbour, and Finding 6 measured DREAM as the dominant fallback when
+        // none exists. Small and passive (a dream isn't real company); lives in apply_task like
+        // every other need mutation, not at dispatch time -- dispatch_cognition's social_snap is
+        // captured before the DREAM branch runs, so bumping social there would log a stale value.
+        needs[t.villager_id].social =
+            std::min(FIXED_POINT_ONE, needs[t.villager_id].social + DREAM_SOCIAL_RECOVERY);
     }
 
     // Store in the actor's own store (for HEARSAY, the listener v remembers the gossip).
