@@ -32,6 +32,11 @@ struct MemoryEntry {
 // out of contention — enough pressure to let young lineages compete without erasing
 // genuinely important ones. Not pre-blessed as final -- A1 metric 8 (myth-persistence)
 // is the guardrail; if it drops as diversity improves, this is overtuned.
+// Run 3 Fix D note: the "~5 retells" rationale above was tuned against age/10 and is now
+// stale -- age/50 (below) makes RETELL_PENALTY proportionally more important as the
+// mechanism that stops a single myth looping forever, since chains can now actually reach
+// hop 3+ where this interaction was previously never exercised. Deliberately NOT retuned
+// here (plan: don't retune pre-emptively, re-check hop_count after Fix D ships).
 constexpr int32_t RETELL_PENALTY = 150;
 
 // FNV-1a 64-bit over free text. Used as BeliefSurvival's content_hash (Step 4) —
@@ -67,9 +72,17 @@ public:
     // most_salient() contention sooner, even if still fairly fresh. Interplay note: this also
     // pushes memories below DEGRADE_THRESHOLD sooner, compounding with proper-noun masking
     // (degradation.h) -- accounted for when tuning RETELL_PENALTY.
+    // Run 3 Fix D (Finding 4): age/10 zeroed real importance differentiation ~20% into a
+    // memory's ~50,000-tick natural store lifetime (500-cap / ~1 new memory per villager per
+    // 100 ticks), collapsing most_salient()/eviction into recency-only selection for the
+    // remaining 80% -- only 5 memories in Run 2's entire 215,400-tick life ever reached hop 3.
+    // age/50 (5x gentler) puts the age term at ~1,000 (half the [100,2000] importance range)
+    // at age=50,000 instead of 5,000 (2.5x past the whole range) under the old divisor, so a
+    // high-importance memory's ordering now survives close to its full natural lifetime
+    // instead of losing to any fresh mediocre one past ~20% of the way through it.
     static int32_t effective_importance(const MemoryEntry& m, uint64_t current_tick) {
         uint64_t age = (current_tick > m.tick) ? (current_tick - m.tick) : 0;
-        return m.importance - (int32_t)(age / 10) - (int32_t)m.retell_count * RETELL_PENALTY;
+        return m.importance - (int32_t)(age / 50) - (int32_t)m.retell_count * RETELL_PENALTY;
     }
 
     // Highest effective importance; tie-break = NEWEST (highest mem_id) so villagers retell
