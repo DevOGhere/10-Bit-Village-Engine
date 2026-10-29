@@ -51,6 +51,13 @@ import urllib.request
 PORT = int(os.environ.get("PORT", 7860))
 WEB_ROOT = os.path.abspath("web")  # Dockerfile COPYs replay/ here; absent in local dev runs
 DATA_REPO = os.environ.get("TBV_DATA_REPO", "DevOGhere/10-Bit-Village-Data")
+# V3: release-tag namespace. Empty (default) keeps the Run 2 tags `backup-<ts>` / `archive-<tick>`.
+# V3 sets TBV_TAG_NS="v3-" so its tags are `v3-backup-<ts>` / `v3-archive-<tick>`: neither can ever
+# match the other run's startswith() filter, so restore_on_boot cannot hand V3 a Run 2 backup
+# (even if the 6-hourly ping fires mid-cutover), and prune/archive cadence never see the other run.
+TAG_NS = os.environ.get("TBV_TAG_NS", "")
+BACKUP_PREFIX = TAG_NS + "backup-"
+ARCHIVE_PREFIX = TAG_NS + "archive-"
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 BACKUP_TOKEN = os.environ.get("TBV_BACKUP_TOKEN", "")
 API = f"https://api.github.com/repos/{DATA_REPO}"
@@ -163,9 +170,9 @@ def restore_on_boot():
         print(f"restore: API error {e.code}, fresh boot", flush=True)
         return
     releases = json.loads(body)
-    release = next((r for r in releases if r.get("tag_name", "").startswith("backup-")), None)
+    release = next((r for r in releases if r.get("tag_name", "").startswith(BACKUP_PREFIX)), None)
     if release is None:
-        print("restore: no backup-* releases in the newest 20, fresh boot", flush=True)
+        print(f"restore: no {BACKUP_PREFIX}* releases in the newest 20, fresh boot", flush=True)
         return
     asset = next((a for a in release.get("assets", []) if a["name"] == "village.db"), None)
     if not asset:
@@ -228,7 +235,7 @@ def prune_old_releases(keep=10):
     try:
         _, body = gh_request("GET", f"{API}/releases?per_page=100")
         releases = json.loads(body)
-        backups = [r for r in releases if r.get("tag_name", "").startswith("backup-")]
+        backups = [r for r in releases if r.get("tag_name", "").startswith(BACKUP_PREFIX)]
         for old in backups[keep:]:
             gh_request("DELETE", f"{API}/releases/{old['id']}")
     except Exception as e:
@@ -245,9 +252,9 @@ def newest_archive_tick():
         return None
     for r in json.loads(body):
         tag = r.get("tag_name", "")
-        if tag.startswith("archive-"):
+        if tag.startswith(ARCHIVE_PREFIX):
             try:
-                return int(tag.split("-", 1)[1])
+                return int(tag[len(ARCHIVE_PREFIX):])
             except ValueError:
                 continue
     return None
@@ -263,7 +270,7 @@ def maybe_archive_and_prune(current_tick):
     last_tick = newest_archive_tick()
     if last_tick is not None and current_tick - last_tick < ARCHIVE_EVERY_TICKS:
         return
-    tag = f"archive-{current_tick}"
+    tag = f"{ARCHIVE_PREFIX}{current_tick}"
     try:
         _, body = gh_request("POST", f"{API}/releases", {"tag_name": tag, "name": tag, "prerelease": True})
         release = json.loads(body)
@@ -302,7 +309,7 @@ def do_backup():
     if not TOKEN:
         return False, "no GITHUB_TOKEN set"
 
-    tag = f"backup-{int(time.time())}"
+    tag = f"{BACKUP_PREFIX}{int(time.time())}"
     _, body = gh_request("POST", f"{API}/releases", {"tag_name": tag, "name": tag, "prerelease": True})
     release = json.loads(body)
     upload_url = release["upload_url"].split("{")[0]

@@ -9,6 +9,7 @@
 #include "core/types.h"
 #include "core/pcg32.h"
 #include "engine/genome.h"
+#include "engine/v3_flags.h"
 #include "engine/needs.h"
 #include "cognition/resolver.h"        // Verb, PerceptionContext, Env
 #include "cognition/cognitive_store.h" // CognitiveStore, MemoryEntry
@@ -121,7 +122,10 @@ public:
     // Spatial state (Phase 3)
     uint16_t pos_x[MAX_VILLAGERS];
     uint16_t pos_y[MAX_VILLAGERS];
-    bool holding_food[MAX_VILLAGERS];
+    // Run 3 Fix G (V3): a CARRY COUNT 0..FOOD_CARRY_CAP, not a bool. Same 1 byte/villager, so the
+    // EngineCheckpoint blob and sizeof() copy are unchanged; 0/1 values (all of Run 2/3 A-F)
+    // are byte-identical, and with TBV_FIX_G off the count never exceeds 1.
+    uint8_t holding_food[MAX_VILLAGERS];
 
     // Run 3 Fix A — ground food tiles. Positions are fixed at genesis (splitmix64_avalanche
     // from master_seed, same non-stream pattern holding_food already uses) and NEVER mutate,
@@ -203,7 +207,7 @@ public:
             // Spatial/food init from splitmix (NOT the streams) so Phase 0 physics is untouched.
             pos_x[i] = (uint16_t)(splitmix64_avalanche(master_seed + i + 0x30000) % GRID_W);
             pos_y[i] = (uint16_t)(splitmix64_avalanche(master_seed + i + 0x40000) % GRID_H);
-            holding_food[i] = (splitmix64_avalanche(master_seed + i + 0x50000) & 1ULL) != 0;
+            holding_food[i] = (splitmix64_avalanche(master_seed + i + 0x50000) & 1ULL) ? 1 : 0;
             last_dream_tick[i] = 0;
         }
 

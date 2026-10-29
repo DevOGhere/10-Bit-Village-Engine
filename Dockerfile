@@ -28,6 +28,7 @@ COPY include/ include/
 COPY tests/pin_vectors.cpp tests/pin_vectors.cpp
 COPY tests/event_state_checkpoint.cpp tests/event_state_checkpoint.cpp
 COPY tests/retell_count_checkpoint.cpp tests/retell_count_checkpoint.cpp
+COPY tests/food_tile_checkpoint.cpp tests/food_tile_checkpoint.cpp
 
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTBV_DEPLOY_TARGET=hf \
     && cmake --build build -j"$(nproc)" --target tbv_engine
@@ -63,6 +64,11 @@ COPY scripts/supervisor.py ./scripts/supervisor.py
 # Live fish-tank client, served by supervisor.py's static-file fallback (`/` -> index.html) --
 # without this HF's own Space page just showed the bare JSON 404 from the API routes.
 COPY replay/ ./web/
+
+# V3 runtime flags (Fix G food-in-hand, Fix E genome biases) and the release-tag namespace that
+# keeps V3's backups/archives separate from Run 2's `backup-*` / `archive-*` (see supervisor.py).
+# Flags are read once at engine start and must stay fixed for the life of a run.
+ENV TBV_FIX_G=1 TBV_FIX_E=1 TBV_TAG_NS=v3-
 
 EXPOSE 7860
 

@@ -165,7 +165,7 @@ void WorldState::dispatch_cognition(VillagerID v) {
     std::vector<VillagerID> nbrs = neighbours(v);
 
     Env env;
-    env.holding_food = holding_food[v];
+    env.holding_food = holding_food[v] > 0;
     // Run 3 Fix A: real ground-food model. This is a verb-selection HINT only -- resolver.h's
     // FLOOR/valid_in_env/biological_urge already read (holding_food || food_in_reach) with no
     // changes needed there. The authoritative, re-checked tile consumption happens in
@@ -196,6 +196,11 @@ void WorldState::dispatch_cognition(VillagerID v) {
     // cognition roll hits — so dreams surface even on the dense grid, without starving hearsay.
     bool can_dream   = !force_action && (current_tick > last_dream_tick[v] + 100) && (nbrs.empty() || (r % 6 == 0));
     bool can_hearsay = !force_action && !nbrs.empty();
+    // Fix E (V3, flag-gated): shy villagers sometimes skip a hearsay turn (falls through to
+    // ACTION). Hash roll, no RNG stream.
+    if (can_hearsay && v3_flags().fixE &&
+        v3_roll(v, current_tick, 0xE3) < SHY_SKIP_PCT[genomes[v].sociability & 3])
+        can_hearsay = false;
 
     DeferredTask t;
     t.villager_id = v;
@@ -278,12 +283,24 @@ void WorldState::dispatch_cognition(VillagerID v) {
     // ---- 4. ACTION (default + survival path): free thought -> intent -> hybrid resolver. ----
     PerceptionContext ctx = build_perception(v, nbrs, env);
     Cognition c = bridge->infer(v, ctx, cseed);
+    // Fix E (V3, flag-gated): genome biases applied by the hidden hands, after the LLM thought is
+    // resolved to a verb. Probabilistic (hash roll), never a hard rule.
+    Verb verb = c.verb;
+    if (v3_flags().fixE && !nbrs.empty()) {
+        if ((verb == Verb::MOVE_TO || verb == Verb::WAIT) && holding_food[v] > 0 &&
+            needs[v].hunger > GIVE_COMFORT_HUNGER &&
+            v3_roll(v, current_tick, 0xE1) < GIVE_BIAS_PCT[genomes[v].generosity & 3])
+            verb = Verb::GIVE;
+        else if (verb == Verb::MOVE_TO &&
+                 v3_roll(v, current_tick, 0xE5) < SPEAK_UPGRADE_PCT[genomes[v].sociability & 3])
+            verb = Verb::SPEAK;
+    }
     t.kind          = TaskKind::ACTION;
     t.mtype         = MemType::EXPERIENCE;
-    t.verb          = c.verb;
+    t.verb          = verb;
     t.target        = v;
     t.origin_mem_id = t.mem_id;                             // self-origin: a firsthand experience
-    if ((c.verb == Verb::GIVE || c.verb == Verb::SPEAK) && !nbrs.empty()) {
+    if ((verb == Verb::GIVE || verb == Verb::SPEAK) && !nbrs.empty()) {
         uint32_t pick = (uint32_t)pcg32_random_bounded_r(&pcg32_cognition_state[v], (int32_t)nbrs.size());
         t.target = nbrs[pick];
     }
@@ -292,7 +309,7 @@ void WorldState::dispatch_cognition(VillagerID v) {
     t.importance = importance(MemType::EXPERIENCE, 0, lowest_need(v), t.mem_id, v, current_tick);
     if (db) {
         db->log_cognition(run_id, v, current_tick, hex64(fnv64_text(ctx.situation)), c.thought,
-                          verb_name(c.verb), word_count(c.thought), genomes[v].pack(),
+                          verb_name(verb), word_count(c.thought), genomes[v].pack(),
                           hunger_snap, social_snap, safety_snap, cseed);
     }
     async_queue.push_back(std::move(t));
@@ -308,7 +325,7 @@ void WorldState::apply_task(const DeferredTask& t) {
                 if (holding_food[t.villager_id]) {
                     needs[t.villager_id].hunger =
                         std::min(FIXED_POINT_ONE, needs[t.villager_id].hunger + 40000);
-                    holding_food[t.villager_id] = false;
+                    holding_food[t.villager_id]--; // count (0/1 unless Fix G); consumes one unit
                 } else {
                     // Run 3 Fix A: ground-eat path. Re-checked HERE at apply/fold_tick time,
                     // never trusted from dispatch-time env.food_in_reach -- that was only a
@@ -339,14 +356,36 @@ void WorldState::apply_task(const DeferredTask& t) {
                 ny = std::min(std::max(ny, 0), GRID_H - 1);
                 pos_x[t.villager_id] = (uint16_t)nx;
                 pos_y[t.villager_id] = (uint16_t)ny;
+                // Fix G (V3, flag-gated): passive pocketing. Deterministic, zero RNG. A villager
+                // under the carry cap and not critically hungry (a critical one eats directly via
+                // the FLOOR path) who lands on/adjacent to an available tile pockets one unit and
+                // the tile starts regrowing. Re-derives the tile fresh against live regrow state.
+                if (v3_flags().fixG && holding_food[t.villager_id] < FOOD_CARRY_CAP &&
+                    needs[t.villager_id].hunger > HUNGER_CRIT) {
+                    int tile = nearest_available_food_tile(t.villager_id, current_tick);
+                    if (tile >= 0) {
+                        holding_food[t.villager_id]++;
+                        food_tile_regrow_tick[tile] = current_tick + FOOD_REGROW_PERIOD;
+                    }
+                }
                 break;
             }
             case Verb::GIVE:
                 if (holding_food[t.villager_id] && t.target != t.villager_id) {
-                    holding_food[t.villager_id] = false;
-                    holding_food[t.target] = true;
-                    needs[t.villager_id].social = std::min(FIXED_POINT_ONE, needs[t.villager_id].social + 20000);
-                    needs[t.target].social      = std::min(FIXED_POINT_ONE, needs[t.target].social + 20000);
+                    bool moved = false;
+                    if (!v3_flags().fixG) {            // pre-V3 behavior, exactly (0/1 bool semantics)
+                        holding_food[t.villager_id] = 0;
+                        holding_food[t.target] = 1;
+                        moved = true;
+                    } else if (holding_food[t.target] < FOOD_CARRY_CAP) {
+                        holding_food[t.villager_id]--;
+                        holding_food[t.target]++;
+                        moved = true;
+                    }
+                    if (moved) {
+                        needs[t.villager_id].social = std::min(FIXED_POINT_ONE, needs[t.villager_id].social + 20000);
+                        needs[t.target].social      = std::min(FIXED_POINT_ONE, needs[t.target].social + 20000);
+                    }
                 }
                 break;
             case Verb::SPEAK:

@@ -62,7 +62,7 @@ static uint64_t world_hash(const tbv::WorldState& w) {
         h = fnv_u64(h, (uint64_t)w.needs[i].hunger);
         h = fnv_u64(h, (uint64_t)w.needs[i].social);
         h = fnv_u64(h, (uint64_t)w.needs[i].safety);
-        h = fnv_u64(h, w.holding_food[i] ? 1u : 0u);
+        h = fnv_u64(h, (uint64_t)w.holding_food[i]); // count; 0/1 identical to the old bool fold
         for (const auto& m : w.stores[i].all()) {
             h = fnv_u64(h, m.mem_id); h = fnv_u64(h, (uint64_t)m.importance);
             h = fnv_u64(h, (uint64_t)m.type); h = fnv_u64(h, m.source_depth);
@@ -117,6 +117,9 @@ static std::vector<tbv::PerceptionContext> phase1_vectors() {
 }
 
 int main(int argc, char** argv) {
+    tbv::v3_flags_from_env();
+    if (tbv::v3_flags().fixG || tbv::v3_flags().fixE)
+        std::cout << "V3 flags: TBV_FIX_G=" << tbv::v3_flags().fixG << " TBV_FIX_E=" << tbv::v3_flags().fixE << "\n";
     uint64_t seed = 12345;
     bool phase1 = false;
     bool phase2 = false;

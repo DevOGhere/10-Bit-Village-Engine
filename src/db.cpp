@@ -267,7 +267,7 @@ void Database::log_tick_state(const WorldState& state) {
         sqlite3_bind_int(stmt, 5, state.needs[i].safety);
         sqlite3_bind_int(stmt, 6, state.pos_x[i]);
         sqlite3_bind_int(stmt, 7, state.pos_y[i]);
-        sqlite3_bind_int(stmt, 8, state.holding_food[i] ? 1 : 0);
+        sqlite3_bind_int(stmt, 8, (int)state.holding_food[i]); // carry count (0/1 before Fix G)
         sqlite3_step(stmt);
         sqlite3_reset(stmt);
     }

@@ -165,9 +165,19 @@ inline RetellResult hearsay_hop(LlamaBridge& bridge, VillagerID listener,
     HearsayFields inbound  = extract_hearsay_fields(heard.text);   // the source, pre-degradation
     RetellResult  rr       = bridge.retell(listener, degraded, trait_prose(g), seed); // §B2
 
-    if (field_match_count(inbound, rr.fields) >= 3) {             // too faithful -> force drift
-        uint64_t dseed = splitmix64_avalanche(
-            (uint64_t)tick ^ ((uint64_t)listener << 20) ^ ((uint64_t)g.pack() << 40));
+    uint64_t dseed = splitmix64_avalanche(
+        (uint64_t)tick ^ ((uint64_t)listener << 20) ^ ((uint64_t)g.pack() << 40));
+    // Fix E (V3, flag-gated): suspicious listeners force drift at a lower faithfulness bar;
+    // curious ones sometimes inject a coined word even when the retelling stayed faithful. Both
+    // are hash-seeded off dseed (no RNG stream). Flag off -> threshold 3, no curiosity roll,
+    // byte-identical to before.
+    int drift_thr = 3;
+    bool curious_roll = false;
+    if (v3_flags().fixE) {
+        drift_thr    = SUSPICION_DRIFT_THR[g.suspicion & 3];
+        curious_roll = (int)((dseed >> 7) % 100ULL) < CURIOUS_TWIST_PCT[g.curiosity & 3];
+    }
+    if (field_match_count(inbound, rr.fields) >= drift_thr || curious_roll) { // force drift
         std::string dw = distortion_word(dseed, coined_words);    // §B6-2
         rr.out_text += " They say it is " + dw + ".";
         rr.fields.twist = dw;
