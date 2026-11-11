@@ -16,7 +16,10 @@
 
 namespace tbv {
 
-struct V3Flags { bool fixG = false; bool fixE = false; };
+// V4 Phase 1 (local branch v4-phase1): fixSalience = hearsay base 1000-50*depth (S1);
+// fixRetell = repeat-what-you-heard prompt (~40 tokens) and no " They say it is X." append.
+// Both default OFF => canonical hashes unchanged. See vault note "V4 Scope Decision (2026-11-11)".
+struct V3Flags { bool fixG = false; bool fixE = false; bool fixSalience = false; bool fixRetell = false; };
 
 inline V3Flags& v3_flags() { static V3Flags f; return f; }
 
@@ -28,6 +31,8 @@ inline bool v3_env_on(const char* name) {
 inline void v3_flags_from_env() {
     v3_flags().fixG = v3_env_on("TBV_FIX_G");
     v3_flags().fixE = v3_env_on("TBV_FIX_E");
+    v3_flags().fixSalience = v3_env_on("TBV_FIX_SALIENCE");
+    v3_flags().fixRetell   = v3_env_on("TBV_FIX_RETELL");
 }
 
 // Fix G: max carried food units per villager (counts are 0..CAP, stored as uint8_t).

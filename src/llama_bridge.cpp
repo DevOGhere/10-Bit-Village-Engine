@@ -1,4 +1,5 @@
 #include "cognition/llama_bridge.h"
+#include "engine/v3_flags.h"
 #include <llama.h>
 #include <vector>
 #include <stdexcept>
@@ -131,8 +132,12 @@ Cognition LlamaBridge::infer(VillagerID id, const PerceptionContext& pc, uint64_
 RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard,
                                   const std::string& persona, uint64_t seed) {
     (void)id;
-    std::string user = persona + "You overhear someone in the village saying: \"" + heard +
-        "\" In your own words, what do you make of it and pass along to others?";
+    const bool v4r = v3_flags().fixRetell;
+    std::string user = v4r
+        ? persona + "You overhear someone in the village saying: \"" + heard +
+          "\" Repeat what you heard in one short sentence, as you would tell it to a neighbour."
+        : persona + "You overhear someone in the village saying: \"" + heard +
+          "\" In your own words, what do you make of it and pass along to others?";
     llama_chat_message msg[1]; msg[0].role = "user"; msg[0].content = user.c_str();
     const char* tmpl = llama_model_chat_template(model, nullptr);
     std::vector<char> tp(user.size() + 1024);
@@ -154,7 +159,7 @@ RetellResult LlamaBridge::retell(VillagerID id, const std::string& heard,
     llama_sampler_chain_add(chain, llama_sampler_init_temp(0.8));
     llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
 
-    std::string out = gen(ctx, vocab, b, pos, chain, 90);
+    std::string out = gen(ctx, vocab, b, pos, chain, v4r ? 40 : 90);
     trim_to_sentence(out); // §B4 -- MUST happen before hearsay_hop's forced-novelty append
                            // (live evidence tick 31908: distortion glued onto a truncated
                            // sentence with no boundary between them)

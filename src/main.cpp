@@ -118,6 +118,8 @@ static std::vector<tbv::PerceptionContext> phase1_vectors() {
 
 int main(int argc, char** argv) {
     tbv::v3_flags_from_env();
+    if (tbv::v3_flags().fixSalience || tbv::v3_flags().fixRetell)
+        std::cout << "V4 flags: TBV_FIX_SALIENCE=" << tbv::v3_flags().fixSalience << " TBV_FIX_RETELL=" << tbv::v3_flags().fixRetell << "\n";
     if (tbv::v3_flags().fixG || tbv::v3_flags().fixE)
         std::cout << "V3 flags: TBV_FIX_G=" << tbv::v3_flags().fixG << " TBV_FIX_E=" << tbv::v3_flags().fixE << "\n";
     uint64_t seed = 12345;

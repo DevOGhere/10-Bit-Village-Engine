@@ -255,7 +255,8 @@ public:
     static int32_t importance(MemType type, uint8_t depth, int32_t lowest_need,
                               uint32_t mem_id, VillagerID v, uint64_t tick) {
         int32_t base = (type == MemType::EXPERIENCE) ? 1000
-                     : (type == MemType::HEARSAY)    ? (800 - 150 * (int32_t)depth)
+                     : (type == MemType::HEARSAY)    ? (v3_flags().fixSalience ? (1000 - 50 * (int32_t)depth)
+                                                                     : (800 - 150 * (int32_t)depth))
                                                      : 600; // DREAM
         int32_t press = (FIXED_POINT_ONE - lowest_need) / 100;            // 0..1000
         uint64_t h = splitmix64_avalanche(((uint64_t)mem_id)

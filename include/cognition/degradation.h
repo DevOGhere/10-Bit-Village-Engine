@@ -177,7 +177,9 @@ inline RetellResult hearsay_hop(LlamaBridge& bridge, VillagerID listener,
         drift_thr    = SUSPICION_DRIFT_THR[g.suspicion & 3];
         curious_roll = (int)((dseed >> 7) % 100ULL) < CURIOUS_TWIST_PCT[g.curiosity & 3];
     }
-    if (field_match_count(inbound, rr.fields) >= drift_thr || curious_roll) { // force drift
+    // V4 TBV_FIX_RETELL: no string-append twist at all (also removes the Fix E curious_roll path).
+    if (!v3_flags().fixRetell &&
+        (field_match_count(inbound, rr.fields) >= drift_thr || curious_roll)) { // force drift
         std::string dw = distortion_word(dseed, coined_words);    // §B6-2
         rr.out_text += " They say it is " + dw + ".";
         rr.fields.twist = dw;
