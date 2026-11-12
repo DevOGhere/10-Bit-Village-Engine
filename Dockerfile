@@ -65,10 +65,10 @@ COPY scripts/supervisor.py ./scripts/supervisor.py
 # without this HF's own Space page just showed the bare JSON 404 from the API routes.
 COPY replay/ ./web/
 
-# V3 runtime flags (Fix G food-in-hand, Fix E genome biases) and the release-tag namespace that
+# V4 Phase 1 runtime flags (SALIENCE hearsay base, RETELL gist prompt) on top of V3's (Fix G food-in-hand, Fix E genome biases) and the release-tag namespace that
 # keeps V3's backups/archives separate from Run 2's `backup-*` / `archive-*` (see supervisor.py).
 # Flags are read once at engine start and must stay fixed for the life of a run.
-ENV TBV_FIX_G=1 TBV_FIX_E=1 TBV_TAG_NS=v3-
+ENV TBV_FIX_G=1 TBV_FIX_E=1 TBV_FIX_SALIENCE=1 TBV_FIX_RETELL=1 TBV_TAG_NS=v4-
 
 EXPOSE 7860
 
