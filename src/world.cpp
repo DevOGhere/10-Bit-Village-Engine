@@ -564,6 +564,10 @@ PerceptionContext WorldState::build_perception(VillagerID v,
     } else {
         s << "You are alone here. ";
     }
+    if (v3_flags().stone && std::max(std::abs((int)STONE_X - (int)pos_x[v]), std::abs((int)STONE_Y - (int)pos_y[v])) <= 2) {
+        if (const char* st = stone_text(v3_flags().stone)) s << "An old stone stands here, carved with words: \"" << st << "\" ";
+        else s << "A smooth, blank stone stands here. ";
+    }
     if (v3_flags().fixRecord) {   // V4 RECORD: newest marker within Chebyshev r<=2, injected verbatim
         for (size_t gi = graves.size(); gi-- > 0; ) {
             const Grave& gr = graves[gi];

@@ -20,7 +20,8 @@ namespace tbv {
 // fixRetell = repeat-what-you-heard prompt (~40 tokens) and no " They say it is X." append.
 // Both default OFF => canonical hashes unchanged. See vault note "V4 Scope Decision (2026-11-11)".
 struct V3Flags { bool fixG = false; bool fixE = false; bool fixSalience = false; bool fixRetell = false;
-                 bool fixMortality = false; bool fixRecord = false; uint32_t lifespan = 7000; };
+                 bool fixMortality = false; bool fixRecord = false; uint32_t lifespan = 7000;
+                 int stone = 0; /* V4 Phase 3: 0 none, 1 mundane, 2 strange (minimally counterintuitive), 3 decoy blank */ };
 
 inline V3Flags& v3_flags() { static V3Flags f; return f; }
 
@@ -40,7 +41,24 @@ inline void v3_flags_from_env() {
     // TBV_FIX_RECORD=1 (needs MORTALITY): a grave marker with the last words is left at the death
     // cell and is read in ACTION perception by villagers within r<=2. Arm C = mortality without it.
     v3_flags().fixRecord = v3_env_on("TBV_FIX_RECORD");
+    // V4 Phase 3 stone: TBV_STONE=none|mundane|strange|decoy. Stateless seeded tile at (STONE_X,STONE_Y),
+    // perceived at r<=2 in ACTION perception. Invented terms (velmarok, thrennic, ostavel) were
+    // checked absent from assets/dict_en.txt and from V3 coinage/memory text.
+    if (const char* st = std::getenv("TBV_STONE")) {
+        if (!std::strcmp(st, "mundane")) v3_flags().stone = 1;
+        else if (!std::strcmp(st, "strange")) v3_flags().stone = 2;
+        else if (!std::strcmp(st, "decoy")) v3_flags().stone = 3;
+    }
     if (const char* l = std::getenv("TBV_LIFESPAN")) { long v = std::atol(l); if (v >= 500) v3_flags().lifespan = (uint32_t)v; }
+}
+
+constexpr uint16_t STONE_X = 16, STONE_Y = 12; // grid is 32x24
+inline const char* stone_text(int variant) {
+    switch (variant) {
+        case 1: return "Velmarok stands where the thrennic water meets the ground. Ostavel hands set it here.";
+        case 2: return "Velmarok remembers every name spoken near it. The thrennic wind answers it, and ostavel hands set it here before there were hands.";
+        default: return nullptr; // decoy: blank
+    }
 }
 
 // Fix G: max carried food units per villager (counts are 0..CAP, stored as uint8_t).

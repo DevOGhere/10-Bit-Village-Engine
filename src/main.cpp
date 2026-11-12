@@ -403,6 +403,21 @@ int main(int argc, char** argv) {
             std::cout << (rec_ok ? "✅" : "❌") << " RECORD: grave cap + newest marker perceived within r<=2\n";
             if (!rec_ok) return 1;
         }
+        {   // STONE: variants perceived only near (STONE_X,STONE_Y); none -> nothing
+            tbv::WorldState w; w.init(seed); w.pos_x[0] = tbv::STONE_X; w.pos_y[0] = tbv::STONE_Y; w.pos_x[1] = 0; w.pos_y[1] = 0;
+            bool ok = true;
+            for (int var = 0; var <= 3; ++var) {
+                tbv::v3_flags().stone = var;
+                std::string near_s = w.situation_for_test(0), far_s = w.situation_for_test(1);
+                bool has = near_s.find("stone") != std::string::npos;
+                ok = ok && (var == 0 ? !has : has) && far_s.find("stone") == std::string::npos;
+                if (var == 2) ok = ok && near_s.find("remembers every name") != std::string::npos;
+                if (var == 3) ok = ok && near_s.find("blank") != std::string::npos;
+            }
+            tbv::v3_flags().stone = 0;
+            std::cout << (ok ? "✅" : "❌") << " STONE: none/mundane/strange/decoy perceived only within r<=2\n";
+            if (!ok) return 1;
+        }
         std::cout << ((d1 == d2 && h1 == h2) ? "✅" : "❌") << " deterministic across two runs\n";
         bool ok = count_ok && m1 <= 3 && h1 && w1 && d1 == d2;
         return ok ? 0 : 1;
