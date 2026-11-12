@@ -418,6 +418,14 @@ int main(int argc, char** argv) {
             std::cout << (ok ? "✅" : "❌") << " STONE: none/mundane/strange/decoy perceived only within r<=2\n";
             if (!ok) return 1;
         }
+        {   // gist edge cases (QA 122); expected strings mirror scripts/v4_gist.py
+            bool ok = tbv::v4_gist("(sighs)") == "(sighs)"
+                   && tbv::v4_gist("Hello *unclosed star here. Second one. Third.") == "Hello *unclosed star here. Second one."
+                   && tbv::v4_gist("(a (b) c) Real claim one. Real two. Three.") == "Real claim one. Real two."
+                   && tbv::v4_gist("(sighs) I saw a fox.\n*nods* It ran away. Later.") == "I saw a fox. It ran away.";
+            std::cout << (ok ? "✅" : "❌") << " v4_gist edge cases (unclosed *, balanced parens, pure stage direction)\n";
+            if (!ok) return 1;
+        }
         std::cout << ((d1 == d2 && h1 == h2) ? "✅" : "❌") << " deterministic across two runs\n";
         bool ok = count_ok && m1 <= 3 && h1 && w1 && d1 == d2;
         return ok ? 0 : 1;

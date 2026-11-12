@@ -330,11 +330,12 @@ void WorldState::dispatch_cognition(VillagerID v) {
                 // of heard/tick, no RNG — safe to call again here purely for the delta metric).
                 // Same coined_words set as hearsay_hop's internal degrade() call (§B6-1) --
                 // otherwise this logged delta wouldn't reflect what was actually masked.
-                std::string degraded = degrade(*m, current_tick, &coined_words);
+                const MemoryEntry hv = heard_view(*m);
+                std::string degraded = degrade(hv, current_tick, &coined_words);
                 int delta = content_word_delta(degraded, rr.out_text);
                 db->log_hearsay_chain(run_id, t.origin_mem_id, t.origin_mem_id, t.source_depth,
                                       src, v, genomes[src].pack(), genomes[v].pack(),
-                                      m->text, rr.out_text, delta, current_tick);
+                                      hv.text, rr.out_text, delta, current_tick);
                 db->log_cognition(run_id, v, current_tick, hex64(fnv64_text(degraded)), rr.out_text,
                                   "HEARSAY", word_count(rr.out_text), genomes[v].pack(),
                                   hunger_snap, social_snap, safety_snap, cseed);

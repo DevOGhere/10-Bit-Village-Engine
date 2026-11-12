@@ -157,15 +157,22 @@ inline int levenshtein(const std::string& a, const std::string& b) {
 // (stage directions) and *actions*, keep the first two sentences, cap 35 words. Mirrored in
 // scripts/v4_telephone_score.py (gist()). Pure string function, no RNG.
 inline std::string v4_gist(const std::string& in) {
-    std::string t; int depth = 0; bool star = false;
-    for (char c : in) {
-        if (c == '(') { ++depth; continue; }
-        if (c == ')') { if (depth > 0) --depth; continue; }
-        if (depth > 0) continue;
-        if (c == '*') { star = !star; continue; }
-        if (star) continue;
-        t += (c == '\n') ? ' ' : c;
-    }
+    // Strip only BALANCED (...) and *...* spans; an unmatched opener is kept as literal text
+    // (QA packet 122: an unclosed '*' used to swallow the rest and fall back to the raw monologue).
+    std::vector<char> drop(in.size(), 0);
+    { std::vector<size_t> st;
+      for (size_t i = 0; i < in.size(); ++i) {
+          if (in[i] == '(') st.push_back(i);
+          else if (in[i] == ')' && !st.empty()) { size_t o = st.back(); st.pop_back(); for (size_t k = o; k <= i; ++k) drop[k] = 1; }
+      } }
+    { long open = -1;
+      for (size_t i = 0; i < in.size(); ++i) {
+          if (drop[i] || in[i] != '*') continue;
+          if (open < 0) open = (long)i;
+          else { for (size_t k = (size_t)open; k <= i; ++k) drop[k] = 1; open = -1; }
+      } }
+    std::string t;
+    for (size_t i = 0; i < in.size(); ++i) if (!drop[i]) t += (in[i] == '\n') ? ' ' : in[i];
     std::string out; int sents = 0, words = 0; bool in_word = false;
     for (size_t i = 0; i < t.size(); ++i) {
         char c = t[i];
@@ -178,7 +185,21 @@ inline std::string v4_gist(const std::string& in) {
     }
     while (!out.empty() && out.front() == ' ') out.erase(out.begin());
     while (!out.empty() && out.back() == ' ') out.pop_back();
-    return out.empty() ? in : out;
+    if (!out.empty()) return out;
+    // nothing survived stripping: first 35 words of the raw input, never the whole monologue
+    std::string raw; int w = 0; bool iw = false;
+    for (char c : in) { if (c == ' ' || c == '\n') { iw = false; if (!raw.empty() && raw.back() != ' ') raw += ' '; continue; }
+                        if (!iw) { iw = true; if (++w > 35) break; } raw += c; }
+    while (!raw.empty() && raw.back() == ' ') raw.pop_back();
+    return raw;
+}
+
+// What a listener actually hears from `m`: with TBV_FIX_RETELL an EXPERIENCE is reduced to its
+// gist (single source for hearsay_hop AND the world.cpp logging, QA packet 122).
+inline MemoryEntry heard_view(const MemoryEntry& m) {
+    MemoryEntry h = m;
+    if (v3_flags().fixRetell && m.type == MemType::EXPERIENCE) h.text = v4_gist(m.text);
+    return h;
 }
 
 // One full hearsay hop: degrade -> two-segment retell -> forced-novelty fallback.
@@ -189,11 +210,8 @@ inline RetellResult hearsay_hop(LlamaBridge& bridge, VillagerID listener,
                                 const MemoryEntry& heard, const Genome& g,
                                 uint64_t tick, uint64_t seed,
                                 const std::set<std::string>* coined_words = nullptr) {
-    MemoryEntry   heard_g;                                  // V4: transmit the gist, not the monologue
-    const MemoryEntry* hp = &heard;
-    if (v3_flags().fixRetell && heard.type == MemType::EXPERIENCE) {
-        heard_g = heard; heard_g.text = v4_gist(heard.text); hp = &heard_g;
-    }
+    const MemoryEntry heard_v = heard_view(heard);          // V4: transmit the gist, not the monologue
+    const MemoryEntry* hp = &heard_v;
     std::string   degraded = degrade(*hp, tick, coined_words);
     HearsayFields inbound  = extract_hearsay_fields(hp->text);   // the source, pre-degradation
     RetellResult  rr       = bridge.retell(listener, degraded, trait_prose(g), seed); // §B2

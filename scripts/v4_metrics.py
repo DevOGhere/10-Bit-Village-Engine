@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """V4 offline metrics over a village.db (read-only): hop histogram, origin-word retention per hop,
 unique carriers per chain, no-echo hop share, relay-delay percentiles. usage: v4_metrics.py village.db"""
-import sqlite3, sys, re, collections, json
+import sqlite3, sys, re, collections, json, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from v4_gist import gist
 SW=set("the a an and or but of to in on at for with is was are were be been it its this that they them their you your i me my we our he she his her as by from not no so do does did have has had will would can could just what which who into out up about all some someone there here very".split())
 cw=lambda t:set(w for w in re.findall(r"[a-z']+",t.lower()) if len(w)>3 and w not in SW)
 db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
@@ -9,11 +11,14 @@ rows=db.execute("select chain_id,hop,src_villager,dst_villager,tick,inbound_text
 out={'rows':len(rows)}
 n=len(rows) or 1
 h=collections.Counter(r[1] for r in rows); out['hop_share']={k:round(h[k]/n,4) for k in sorted(h)}
-origin={}; ret=collections.defaultdict(list)
+origin={}; gorigin={}; ret=collections.defaultdict(list); gret=collections.defaultdict(list)
 for c,hp,s,d,t,i,o in rows:
-    if hp==1: origin.setdefault(c,cw(i))
+    if hp==1: origin.setdefault(c,cw(i)); gorigin.setdefault(c,cw(gist(i)))
 for c,hp,s,d,t,i,o in rows:
-    if origin.get(c): ret[hp].append(len(origin[c]&cw(o.split(' They say it is ')[0]))/len(origin[c]))
+    oc=cw(o.split(' They say it is ')[0])
+    if origin.get(c): ret[hp].append(len(origin[c]&oc)/len(origin[c]))
+    if gorigin.get(c): gret[hp].append(len(gorigin[c]&oc)/len(gorigin[c]))
+out['gist_retention']={k:round(sum(v)/len(v),3) for k,v in sorted(gret.items())}
 out['origin_retention']={k:round(sum(v)/len(v),3) for k,v in sorted(ret.items())}
 car=collections.defaultdict(set); seen=collections.defaultdict(set); echo=collections.Counter(); tot=collections.Counter()
 for c,hp,s,d,t,i,o in rows:
