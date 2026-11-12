@@ -153,6 +153,34 @@ inline int levenshtein(const std::string& a, const std::string& b) {
     return prev[b.size()];
 }
 
+// V4 TBV_FIX_RETELL: reduce a long first-person monologue to its transmissible claim: drop
+// (stage directions) and *actions*, keep the first two sentences, cap 35 words. Mirrored in
+// scripts/v4_telephone_score.py (gist()). Pure string function, no RNG.
+inline std::string v4_gist(const std::string& in) {
+    std::string t; int depth = 0; bool star = false;
+    for (char c : in) {
+        if (c == '(') { ++depth; continue; }
+        if (c == ')') { if (depth > 0) --depth; continue; }
+        if (depth > 0) continue;
+        if (c == '*') { star = !star; continue; }
+        if (star) continue;
+        t += (c == '\n') ? ' ' : c;
+    }
+    std::string out; int sents = 0, words = 0; bool in_word = false;
+    for (size_t i = 0; i < t.size(); ++i) {
+        char c = t[i];
+        if (c == ' ') { in_word = false; if (!out.empty() && out.back() != ' ') out += c; continue; }
+        if (!in_word) { in_word = true; if (++words > 35) break; }
+        out += c;
+        if ((c == '.' || c == '!' || c == '?') && (i + 1 >= t.size() || t[i + 1] == ' ')) {
+            if (++sents >= 2) break;
+        }
+    }
+    while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out.empty() ? in : out;
+}
+
 // One full hearsay hop: degrade -> two-segment retell -> forced-novelty fallback.
 // `coined_words` (nullptr = old behaviour, e.g. pre-existing gates) feeds both B6-1 (degrade
 // sparing) and B6-2 (distortion vocabulary) -- same set, single source of truth, so a memory's
@@ -161,8 +189,13 @@ inline RetellResult hearsay_hop(LlamaBridge& bridge, VillagerID listener,
                                 const MemoryEntry& heard, const Genome& g,
                                 uint64_t tick, uint64_t seed,
                                 const std::set<std::string>* coined_words = nullptr) {
-    std::string   degraded = degrade(heard, tick, coined_words);
-    HearsayFields inbound  = extract_hearsay_fields(heard.text);   // the source, pre-degradation
+    MemoryEntry   heard_g;                                  // V4: transmit the gist, not the monologue
+    const MemoryEntry* hp = &heard;
+    if (v3_flags().fixRetell && heard.type == MemType::EXPERIENCE) {
+        heard_g = heard; heard_g.text = v4_gist(heard.text); hp = &heard_g;
+    }
+    std::string   degraded = degrade(*hp, tick, coined_words);
+    HearsayFields inbound  = extract_hearsay_fields(hp->text);   // the source, pre-degradation
     RetellResult  rr       = bridge.retell(listener, degraded, trait_prose(g), seed); // §B2
 
     uint64_t dseed = splitmix64_avalanche(

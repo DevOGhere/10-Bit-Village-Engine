@@ -132,6 +132,7 @@ int main(int argc, char** argv) {
     bool checkpoint_gate = false;
     bool serve_mode = false;
     bool phase0_gate = false;
+    std::string tele_file;   // V4 Gate 1: --telephone_bench <seeds.txt>
     int run_n = 1000;
     int p3_n = 600;
     int coin_n = 1000;
@@ -146,6 +147,7 @@ int main(int argc, char** argv) {
         if (arg == "--phase1") phase1 = true;
         if (arg == "--phase2") phase2 = true;
         if (arg == "--hearsay_fix") hearsay_fix = true;
+        if (arg == "--telephone_bench" && i + 1 < argc) tele_file = argv[++i];
         if (arg == "--phase3") { phase3 = true; if (i + 1 < argc && argv[i+1][0] != '-') p3_n = std::stoi(argv[++i]); }
         if (arg == "--run")    { run_mode = true; if (i + 1 < argc && argv[i+1][0] != '-') run_n = std::stoi(argv[++i]); }
         if (arg == "--coinage") { coinage = true; if (i + 1 < argc && argv[i+1][0] != '-') coin_n = std::stoi(argv[++i]); }
@@ -345,6 +347,53 @@ int main(int argc, char** argv) {
             std::cout << "FAIL: " << e.what() << "\n";
             return 1;
         }
+    }
+
+    // ---- V4 Gate 1 telephone bench: reads seed texts (separated by a line "=====") and runs each
+    // through 6 real hearsay hops (degrade -> retell -> twist) with the CURRENT flag env, printing
+    // JSONL {seed,hop,text}. Run twice (flags off / TBV_FIX_RETELL=1) and score with
+    // scripts/v4_telephone_score.py. No DB, no world; deterministic per --seed. ----
+    if (!tele_file.empty()) {
+        try {
+            std::ifstream in(tele_file);
+            std::vector<std::string> seeds_txt; std::string line, cur;
+            while (std::getline(in, line)) {
+                if (line == "=====") { if (!cur.empty()) seeds_txt.push_back(cur); cur.clear(); }
+                else cur += (cur.empty() ? "" : "\n") + line;
+            }
+            if (!cur.empty()) seeds_txt.push_back(cur);
+            tbv::LlamaBridge bridge("models/smollm2-360m-instruct-q8_0.gguf");
+            auto esc = [](const std::string& t) {
+                std::string o;
+                for (unsigned char c : t) {
+                    if (c == '"') o += "\\\""; else if (c == '\\') o += "\\\\";
+                    else if (c == '\n') o += "\\n"; else if (c < 0x20) o += ' ';
+                    else o += (char)c;
+                }
+                return o;
+            };
+            for (size_t si = 0; si < seeds_txt.size(); ++si) {
+                tbv::MemoryEntry cur_m;
+                cur_m.mem_id = 0; cur_m.tick = 0; cur_m.importance = 1700;
+                cur_m.type = tbv::MemType::EXPERIENCE; cur_m.text = seeds_txt[si];
+                std::cout << "{\"seed\":" << si << ",\"hop\":0,\"text\":\"" << esc(cur_m.text) << "\"}\n";
+                for (int hop = 1; hop <= 6; ++hop) {
+                    tbv::Genome g{ (uint8_t)(hop & 3), (uint8_t)((hop >> 1) & 3),
+                                   (uint8_t)((seed >> hop) & 3), (uint8_t)((seed >> (hop+2)) & 3),
+                                   (uint8_t)(hop % 3) };
+                    uint64_t tick = (uint64_t)hop * 60;
+                    tbv::RetellResult rr = tbv::hearsay_hop(bridge, (tbv::VillagerID)hop, cur_m, g, tick,
+                                                            seed + si * 1000 + hop);
+                    std::cout << "{\"seed\":" << si << ",\"hop\":" << hop << ",\"text\":\"" << esc(rr.out_text) << "\"}\n";
+                    std::cout.flush();
+                    cur_m.mem_id = (uint32_t)hop; cur_m.tick = tick;
+                    cur_m.type = tbv::MemType::HEARSAY; cur_m.source_depth = (uint8_t)hop;
+                    cur_m.importance = tbv::v3_flags().fixSalience ? 1500 : 1300;
+                    cur_m.text = rr.out_text;
+                }
+            }
+            return 0;
+        } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << "\n"; return 1; }
     }
 
     // ---- Hearsay-fix gate (MSG_062 §2): memory-degradation + two-segment retell + forced
