@@ -156,6 +156,12 @@ public:
     uint32_t next_mem_id = 0;       // monotonic, deterministic id source
     uint64_t task_seq_counter = 0;  // monotonic dispatch counter
 
+    // V4 Phase 2 RECORD: readable grave markers (newest last, capped). NOT checkpointed -- fine for
+    // scratch gate runs; a live --serve deploy must extend EngineCheckpoint first (gate item).
+    struct Grave { uint16_t x = 0, y = 0; uint64_t tick = 0; std::string text; };
+    std::vector<Grave> graves;
+    static constexpr size_t MAX_GRAVES = 12;
+
     // Queue of resolved cognition tasks waiting to fold back at their fold_tick.
     std::vector<DeferredTask> async_queue;
 
@@ -181,6 +187,7 @@ public:
         next_mem_id = 0;
         task_seq_counter = 0;
         async_queue.clear();
+        graves.clear();
         coined_words.clear();
         active_event = VillageEvent::NONE;
         event_start_tick = 0;
@@ -273,6 +280,7 @@ public:
     // per-villager phase off(v) = splitmix(v+0xA0000) % L and dies whenever (t + off) % L == 0,
     // t > 0. Staggers deaths (~1 per L/100 ticks) with no synchronized extinction, and generation
     // and age are pure functions of (v, t), so a restored world needs nothing extra.
+    std::string situation_for_test(VillagerID v) const { return build_perception(v, {}, Env()).situation; }
     void process_deaths();    // V4 Phase 2 (TBV_FIX_MORTALITY), see world.cpp; public so --mortality_gate can drive it
     static uint64_t life_phase(VillagerID v, uint32_t L) { return splitmix64_avalanche((uint64_t)v + 0xA0000) % L; }
     static bool is_death_tick(VillagerID v, uint64_t t, uint32_t L) { return t > 0 && ((t + life_phase(v, L)) % L) == 0; }

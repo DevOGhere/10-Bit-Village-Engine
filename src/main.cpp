@@ -355,7 +355,7 @@ int main(int argc, char** argv) {
     // world. Asserts schedule + heir + witnesses + determinism. ----
     if (mortality_gate) {
         std::cout << "Mortality Gate (no LLM)\n";
-        tbv::v3_flags().fixMortality = true; tbv::v3_flags().lifespan = 600;
+        tbv::v3_flags().fixMortality = true; tbv::v3_flags().fixRecord = true; tbv::v3_flags().lifespan = 600;
         const uint32_t L = 600;
         auto run = [&](uint64_t& deaths, bool& heirs_ok, bool& witness_ok, uint64_t& max_per_tick) {
             tbv::Database db(":memory:"); db.init_schema();
@@ -394,6 +394,15 @@ int main(int argc, char** argv) {
         std::cout << (m1 <= 3 ? "✅" : "❌") << " staggered (no synchronized wave)\n";
         std::cout << (h1 ? "✅" : "❌") << " heir: empty store, no food, exactly 1-bit genome flip\n";
         std::cout << (w1 ? "✅" : "❌") << " witnesses within r<=2 receive last words\n";
+        {   // RECORD: graves capped, newest last, and a perception built next to one carries the marker
+            tbv::WorldState w; w.init(seed);
+            for (uint32_t i = 0; i < 20; ++i) { tbv::WorldState::Grave g; g.x = w.pos_x[0]; g.y = w.pos_y[0]; g.tick = i; g.text = "G" + std::to_string(i); w.graves.push_back(g); if (w.graves.size() > tbv::WorldState::MAX_GRAVES) w.graves.erase(w.graves.begin()); }
+            std::string sit = w.situation_for_test(0);
+            bool rec_ok = w.graves.size() == tbv::WorldState::MAX_GRAVES && sit.find("weathered marker") != std::string::npos
+                          && sit.find("G19") != std::string::npos;
+            std::cout << (rec_ok ? "✅" : "❌") << " RECORD: grave cap + newest marker perceived within r<=2\n";
+            if (!rec_ok) return 1;
+        }
         std::cout << ((d1 == d2 && h1 == h2) ? "✅" : "❌") << " deterministic across two runs\n";
         bool ok = count_ok && m1 <= 3 && h1 && w1 && d1 == d2;
         return ok ? 0 : 1;

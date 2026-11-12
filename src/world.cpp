@@ -146,6 +146,10 @@ void WorldState::process_deaths() {
         uint8_t* traits[5] = { &genomes[v].aggression, &genomes[v].generosity, &genomes[v].curiosity,
                                &genomes[v].sociability, &genomes[v].suspicion };
         *traits[h % 5] ^= (uint8_t)(1u << ((h >> 8) & 1));
+        if (v3_flags().fixRecord) {
+            graves.push_back(Grave{pos_x[v], pos_y[v], current_tick, words});
+            if (graves.size() > MAX_GRAVES) graves.erase(graves.begin());
+        }
         stores[v] = CognitiveStore();
         needs[v] = Needs();
         holding_food[v] = 0;
@@ -559,6 +563,15 @@ PerceptionContext WorldState::build_perception(VillagerID v,
         s << "). ";
     } else {
         s << "You are alone here. ";
+    }
+    if (v3_flags().fixRecord) {   // V4 RECORD: newest marker within Chebyshev r<=2, injected verbatim
+        for (size_t gi = graves.size(); gi-- > 0; ) {
+            const Grave& gr = graves[gi];
+            if (std::max(std::abs((int)gr.x - (int)pos_x[v]), std::abs((int)gr.y - (int)pos_y[v])) <= 2) {
+                s << "A weathered marker stands here, scratched with words: " << gr.text << " ";
+                break;
+            }
+        }
     }
     s << "Think about your situation.";
     ctx.situation = s.str();
