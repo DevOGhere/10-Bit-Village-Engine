@@ -19,7 +19,8 @@ namespace tbv {
 // V4 Phase 1 (local branch v4-phase1): fixSalience = hearsay base 1000-50*depth (S1);
 // fixRetell = repeat-what-you-heard prompt (~40 tokens) and no " They say it is X." append.
 // Both default OFF => canonical hashes unchanged. See vault note "V4 Scope Decision (2026-11-11)".
-struct V3Flags { bool fixG = false; bool fixE = false; bool fixSalience = false; bool fixRetell = false; };
+struct V3Flags { bool fixG = false; bool fixE = false; bool fixSalience = false; bool fixRetell = false;
+                 bool fixMortality = false; uint32_t lifespan = 7000; };
 
 inline V3Flags& v3_flags() { static V3Flags f; return f; }
 
@@ -33,6 +34,10 @@ inline void v3_flags_from_env() {
     v3_flags().fixE = v3_env_on("TBV_FIX_E");
     v3_flags().fixSalience = v3_env_on("TBV_FIX_SALIENCE");
     v3_flags().fixRetell   = v3_env_on("TBV_FIX_RETELL");
+    // V4 Phase 2: TBV_FIX_MORTALITY=1 -> staggered fixed-lifespan death + in-place heir respawn.
+    // TBV_LIFESPAN overrides the lifespan in ticks (default 7000, clamp >= 500).
+    v3_flags().fixMortality = v3_env_on("TBV_FIX_MORTALITY");
+    if (const char* l = std::getenv("TBV_LIFESPAN")) { long v = std::atol(l); if (v >= 500) v3_flags().lifespan = (uint32_t)v; }
 }
 
 // Fix G: max carried food units per villager (counts are 0..CAP, stored as uint8_t).

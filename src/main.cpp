@@ -132,6 +132,7 @@ int main(int argc, char** argv) {
     bool checkpoint_gate = false;
     bool serve_mode = false;
     bool phase0_gate = false;
+    bool mortality_gate = false;
     std::string tele_file;   // V4 Gate 1: --telephone_bench <seeds.txt>
     int run_n = 1000;
     int p3_n = 600;
@@ -147,6 +148,7 @@ int main(int argc, char** argv) {
         if (arg == "--phase1") phase1 = true;
         if (arg == "--phase2") phase2 = true;
         if (arg == "--hearsay_fix") hearsay_fix = true;
+        if (arg == "--mortality_gate") mortality_gate = true;
         if (arg == "--telephone_bench" && i + 1 < argc) tele_file = argv[++i];
         if (arg == "--phase3") { phase3 = true; if (i + 1 < argc && argv[i+1][0] != '-') p3_n = std::stoi(argv[++i]); }
         if (arg == "--run")    { run_mode = true; if (i + 1 < argc && argv[i+1][0] != '-') run_n = std::stoi(argv[++i]); }
@@ -347,6 +349,54 @@ int main(int argc, char** argv) {
             std::cout << "FAIL: " << e.what() << "\n";
             return 1;
         }
+    }
+
+    // ---- V4 Phase 2 mortality gate (no LLM): drives process_deaths() directly on a hand-built
+    // world. Asserts schedule + heir + witnesses + determinism. ----
+    if (mortality_gate) {
+        std::cout << "Mortality Gate (no LLM)\n";
+        tbv::v3_flags().fixMortality = true; tbv::v3_flags().lifespan = 600;
+        const uint32_t L = 600;
+        auto run = [&](uint64_t& deaths, bool& heirs_ok, bool& witness_ok, uint64_t& max_per_tick) {
+            tbv::Database db(":memory:"); db.init_schema();
+            tbv::WorldState w; w.init(seed); w.attach(nullptr, &db, "m");
+            deaths = 0; max_per_tick = 0; heirs_ok = true; witness_ok = true;
+            // seed every villager with one distinctive memory so most_salient has something
+            for (uint32_t v = 0; v < tbv::MAX_VILLAGERS; ++v) {
+                tbv::MemoryEntry e; e.mem_id = w.next_mem_id++; e.tick = 0; e.actor_id = v; e.importance = 1500;
+                e.type = tbv::MemType::EXPERIENCE; e.origin_mem_id = e.mem_id;
+                e.text = "I found a glowing apple by the lake near Brindlemark. Extra words follow here."; w.stores[v].add(e, 0);
+            }
+            for (w.current_tick = 1; w.current_tick <= 3000; ++w.current_tick) {
+                uint64_t today = 0;
+                for (uint32_t v = 0; v < tbv::MAX_VILLAGERS; ++v) if (tbv::WorldState::is_death_tick(v, w.current_tick, L)) {
+                    ++today;
+                    uint16_t before = w.genomes[v].pack();
+                    size_t near_n = 0; for (uint32_t n = 0; n < tbv::MAX_VILLAGERS; ++n)
+                        if (n != v && std::max(std::abs((int)w.pos_x[n]-(int)w.pos_x[v]), std::abs((int)w.pos_y[n]-(int)w.pos_y[v])) <= 2) ++near_n;
+                    std::vector<size_t> sz; for (uint32_t n = 0; n < tbv::MAX_VILLAGERS; ++n) sz.push_back(w.stores[n].all().size());
+                    w.process_deaths();
+                    uint16_t x = (uint16_t)(before ^ w.genomes[v].pack());
+                    if (!(x && (x & (x - 1)) == 0)) heirs_ok = false;            // exactly one bit flipped
+                    if (!w.stores[v].all().empty() || w.holding_food[v] != 0) heirs_ok = false;
+                    size_t got = 0; for (uint32_t n = 0; n < tbv::MAX_VILLAGERS; ++n)
+                        if (n != v && w.stores[n].all().size() > sz[n]) ++got;
+                    if (near_n > 0 && got == 0 && std::min<size_t>(sz[0], 500) < 500) witness_ok = false;
+                }
+                deaths += today; if (today > max_per_tick) max_per_tick = today;
+            }
+        };
+        uint64_t d1, d2, m1, m2; bool h1, h2, w1, w2;
+        run(d1, h1, w1, m1); run(d2, h2, w2, m2);
+        std::cout << "deaths over 3000 ticks (L=600): " << d1 << " (expect ~500), max/tick " << m1 << "\n";
+        bool count_ok = d1 >= 480 && d1 <= 520;
+        std::cout << (count_ok ? "✅" : "❌") << " death count ~ 100*3000/600\n";
+        std::cout << (m1 <= 3 ? "✅" : "❌") << " staggered (no synchronized wave)\n";
+        std::cout << (h1 ? "✅" : "❌") << " heir: empty store, no food, exactly 1-bit genome flip\n";
+        std::cout << (w1 ? "✅" : "❌") << " witnesses within r<=2 receive last words\n";
+        std::cout << ((d1 == d2 && h1 == h2) ? "✅" : "❌") << " deterministic across two runs\n";
+        bool ok = count_ok && m1 <= 3 && h1 && w1 && d1 == d2;
+        return ok ? 0 : 1;
     }
 
     // ---- V4 Gate 1 telephone bench: reads seed texts (separated by a line "=====") and runs each

@@ -269,6 +269,15 @@ public:
         return imp;
     }
 
+    // V4 Phase 2 mortality: STATELESS schedule (no new checkpoint state). Villager v has a fixed
+    // per-villager phase off(v) = splitmix(v+0xA0000) % L and dies whenever (t + off) % L == 0,
+    // t > 0. Staggers deaths (~1 per L/100 ticks) with no synchronized extinction, and generation
+    // and age are pure functions of (v, t), so a restored world needs nothing extra.
+    void process_deaths();    // V4 Phase 2 (TBV_FIX_MORTALITY), see world.cpp; public so --mortality_gate can drive it
+    static uint64_t life_phase(VillagerID v, uint32_t L) { return splitmix64_avalanche((uint64_t)v + 0xA0000) % L; }
+    static bool is_death_tick(VillagerID v, uint64_t t, uint32_t L) { return t > 0 && ((t + life_phase(v, L)) % L) == 0; }
+    static uint64_t generation(VillagerID v, uint64_t t, uint32_t L) { return (t + life_phase(v, L)) / L; }
+
 private:
     // --- Phase 3 helpers, defined in src/world.cpp ---
     void dispatch_cognition(VillagerID v);

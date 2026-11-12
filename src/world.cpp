@@ -36,6 +36,7 @@ void WorldState::tick() {
     // ticks, past an EVENT_CHECK_EVERY boundary). Runs BEFORE dispatch so a fresh famine is
     // visible to this tick's build_perception() call, not one tick late. ----
     if (bridge) check_world_event();
+    if (bridge && v3_flags().fixMortality) process_deaths(); // V4 Phase 2; before dispatch so the heir is who acts
 
     // ---- A. DISPATCH: exactly ONE villager does ONE cognition event (LOCK 1). ----
     if (bridge) {
@@ -92,6 +93,66 @@ void WorldState::tick() {
     }
 
     current_tick++;
+}
+
+
+// ============================================================================
+// process_deaths -- V4 Phase 2 (TBV_FIX_MORTALITY). Runs at the top of tick() under `if (bridge)`.
+// For each villager whose scheduled death tick is now:
+//   1. LAST WORDS: the dying villager's most-salient memory, gisted, becomes an EXPERIENCE memory
+//      (importance 2000) for every villager within Chebyshev r<=2, and those witnesses take a
+//      safety shock (-45000). Witnesses can then retell it through the normal hearsay path.
+//   2. Pending async tasks for the dead villager are purged (they would fold into the heir).
+//   3. HEIR respawns in place (same cell): empty store, fresh needs, no food, 1-bit genome flip.
+// All randomness is hash-seeded (no stream draws). Every wiped memory is logged as a belief death.
+// ============================================================================
+void WorldState::process_deaths() {
+    const uint32_t L = v3_flags().lifespan;
+    for (uint32_t v = 0; v < MAX_VILLAGERS; ++v) {
+        if (!is_death_tick(v, current_tick, L)) continue;
+
+        std::string words;
+        if (const MemoryEntry* m = stores[v].most_salient(current_tick))
+            words = "Before dying, V" + std::to_string(v) + " said: \"" + v4_gist(m->text) + "\"";
+        else
+            words = "V" + std::to_string(v) + " died without a word.";
+
+        // 1. witnesses (r<=2, excluding the dying villager)
+        for (uint32_t n = 0; n < MAX_VILLAGERS; ++n) {
+            if (n == v) continue;
+            int dx = std::abs((int)pos_x[n] - (int)pos_x[v]), dy = std::abs((int)pos_y[n] - (int)pos_y[v]);
+            if (std::max(dx, dy) > 2) continue;
+            needs[n].safety -= 45000; if (needs[n].safety < 0) needs[n].safety = 0;
+            MemoryEntry e;
+            e.mem_id = next_mem_id++; e.tick = current_tick; e.actor_id = v; e.importance = 2000;
+            e.type = MemType::EXPERIENCE; e.source_depth = 0; e.origin_mem_id = e.mem_id; e.text = words;
+            std::optional<MemoryEntry> evicted = stores[n].add(e, current_tick);
+            if (db) {
+                db->persist_memory(run_id, n, e);
+                db->log_belief_birth(run_id, e.mem_id, e.type, e.tick, e.importance, e.source_depth, fnv64_text(e.text));
+                if (evicted) db->mark_belief_death(run_id, evicted->mem_id, current_tick, evicted->origin_mem_id);
+            }
+        }
+
+        // 2. purge pending tasks of the dead villager
+        async_queue.erase(std::remove_if(async_queue.begin(), async_queue.end(),
+            [v](const DeferredTask& t) { return t.villager_id == v; }), async_queue.end());
+
+        // 3. heir: log + wipe + respawn
+        uint16_t g_before = genomes[v].pack();
+        if (db) for (const auto& m : stores[v].all())
+            db->mark_belief_death(run_id, m.mem_id, current_tick, m.origin_mem_id);
+        uint64_t h = splitmix64_avalanche(((uint64_t)v << 20) ^ (current_tick * 0x9E3779B97F4A7C15ULL) ^ 0xDEAD);
+        uint8_t* traits[5] = { &genomes[v].aggression, &genomes[v].generosity, &genomes[v].curiosity,
+                               &genomes[v].sociability, &genomes[v].suspicion };
+        *traits[h % 5] ^= (uint8_t)(1u << ((h >> 8) & 1));
+        stores[v] = CognitiveStore();
+        needs[v] = Needs();
+        holding_food[v] = 0;
+        last_dream_tick[v] = current_tick;
+        if (db) db->log_life_event(run_id, current_tick, v, generation(v, current_tick, L), g_before,
+                                   genomes[v].pack(), words);
+    }
 }
 
 // §C1 -- ~20 hand-written lines, deterministic pick (own event RNG stream, not text

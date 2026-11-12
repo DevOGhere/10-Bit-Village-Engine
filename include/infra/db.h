@@ -68,6 +68,10 @@ public:
                                VillagerID adopter_id, uint64_t adoption_tick,
                                const std::string& context);
 
+    // V4 Phase 2: one row per death (generation just ended, genome before/after the heir's 1-bit flip).
+    void log_life_event(const std::string& run_id, uint64_t tick, VillagerID v, uint64_t generation,
+                        uint16_t genome_before, uint16_t genome_after, const std::string& last_words);
+
     void log_world_digest(const std::string& run_id, uint64_t tick, uint64_t seed,
                            uint64_t world_hash, int belief_count, int coined_terms,
                            int avg_importance, int max_hearsay_depth, uint64_t genome_dist_hash);

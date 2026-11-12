@@ -117,6 +117,9 @@ void Database::init_schema() {
         "   context TEXT"
         ");"
 
+        "CREATE TABLE IF NOT EXISTS LifeEvents ("
+        "   run_id TEXT, tick INTEGER, villager_id INTEGER, generation INTEGER,"
+        "   genome_before INTEGER, genome_after INTEGER, last_words TEXT);"
         "CREATE TABLE IF NOT EXISTS WorldDigest ("
         "   run_id TEXT,"
         "   tick INTEGER,"
@@ -791,4 +794,23 @@ bool Database::backup_to(const std::string& dest_path) {
     return ok;
 }
 
+} // namespace tbv
+
+namespace tbv {
+void Database::log_life_event(const std::string& run_id, uint64_t tick, VillagerID v, uint64_t generation,
+                              uint16_t genome_before, uint16_t genome_after, const std::string& last_words) {
+    const char* sql = "INSERT INTO LifeEvents (run_id, tick, villager_id, generation, genome_before, genome_after, last_words)"
+                      " VALUES (?, ?, ?, ?, ?, ?, ?);";
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, run_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)tick);
+    sqlite3_bind_int(stmt, 3, (int)v);
+    sqlite3_bind_int64(stmt, 4, (sqlite3_int64)generation);
+    sqlite3_bind_int(stmt, 5, genome_before);
+    sqlite3_bind_int(stmt, 6, genome_after);
+    sqlite3_bind_text(stmt, 7, last_words.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
 } // namespace tbv
